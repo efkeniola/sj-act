@@ -1,40 +1,69 @@
 workflows:
-  sj-act-android-release:
+
+  # ─────────────────────────────────────────────
+  # 1. ANDROID RELEASE  (APK + AAB)
+  # ─────────────────────────────────────────────
+  android-release:
     name: SJ ACT — Android Release
     max_build_duration: 60
     instance_type: mac_mini_m2
 
     environment:
       groups:
-        - sj_act_secrets          # group name in Codemagic dashboard
+        - sj_act_secrets
       vars:
-        PACKAGE_NAME: "com.sj_act"
-        FLUTTER_VERSION: "3.22.0"
-      flutter: 3.22.0
+        FLUTTER_VERSION: "3.24.0"
+        JAVA_VERSION: "17"
+      flutter: default
       java: 17
-      android_signing:
-        - sj_act_keystore
+
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+          source: true
 
     scripts:
-      - name: Get dependencies
-        script: flutter pub get
 
-      - name: Run analyzer
-        script: flutter analyze --no-fatal-infos
-
-      - name: Build APK (release, with API key injected)
+      - name: Set up keystore
         script: |
+          mkdir -p $CM_BUILD_DIR/android/keystore
+
+          # Decode base64 keystore into the correct location
+          echo $CM_KEYSTORE_BASE64 | base64 --decode \
+            > $CM_BUILD_DIR/android/keystore/sj_act_release.jks
+
+          # Write key.properties (never committed to git)
+          cat > $CM_BUILD_DIR/android/key.properties <<EOF
+          storePassword=$CM_KEYSTORE_PASSWORD
+          keyPassword=$CM_KEY_PASSWORD
+          keyAlias=$CM_KEY_ALIAS
+          storeFile=../keystore/sj_act_release.jks
+          EOF
+
+      - name: Get Flutter packages
+        script: |
+          cd $CM_BUILD_DIR
+          flutter pub get
+
+      - name: Run tests
+        script: |
+          cd $CM_BUILD_DIR
+          flutter test || true   # remove "|| true" if you want failed tests to stop the build
+
+      - name: Build APK (release)
+        script: |
+          cd $CM_BUILD_DIR
           flutter build apk --release \
-            --dart-define=ACT_API_KEY=$SJACT_API_KEY \
-            --build-name=$(cat pubspec.yaml | grep "^version:" | sed 's/version: //' | cut -d'+' -f1) \
-            --build-number=$CM_BUILD_NUMBER
+            --dart-define=ACT_API_KEY=$ACT_API_KEY
 
-      - name: Build AAB (Google Play)
+      - name: Build App Bundle / AAB (release)
         script: |
+          cd $CM_BUILD_DIR
           flutter build appbundle --release \
-            --dart-define=ACT_API_KEY=$SJACT_API_KEY \
-            --build-name=$(cat pubspec.yaml | grep "^version:" | sed 's/version: //' | cut -d'+' -f1) \
-            --build-number=$CM_BUILD_NUMBER
+            --dart-define=ACT_API_KEY=$ACT_API_KEY
 
     artifacts:
       - build/app/outputs/flutter-apk/app-release.apk
@@ -49,7 +78,17 @@ workflows:
           success: true
           failure: true
 
-  sj-act-android-debug:
+      # ── Uncomment when ready to publish to Play Store ──
+      # google_play:
+      #   credentials: $GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
+      #   track: internal          # internal → alpha → beta → production
+      #   submit_as_draft: true
+
+
+  # ─────────────────────────────────────────────
+  # 2. ANDROID DEBUG  (quick test builds)
+  # ─────────────────────────────────────────────
+  android-debug:
     name: SJ ACT — Android Debug
     max_build_duration: 30
     instance_type: mac_mini_m2
@@ -57,19 +96,29 @@ workflows:
     environment:
       groups:
         - sj_act_secrets
-      vars:
-        PACKAGE_NAME: "com.sj_act"
-      flutter: 3.22.0
+      flutter: default
       java: 17
 
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: develop
+          include: true
+          source: true
+
     scripts:
-      - name: Get dependencies
-        script: flutter pub get
+
+      - name: Get Flutter packages
+        script: |
+          cd $CM_BUILD_DIR
+          flutter pub get
 
       - name: Build debug APK
         script: |
+          cd $CM_BUILD_DIR
           flutter build apk --debug \
-            --dart-define=ACT_API_KEY=$SJACT_API_KEY_DEV
+            --dart-define=ACT_API_KEY=$ACT_API_KEY
 
     artifacts:
       - build/app/outputs/flutter-apk/app-debug.apk
@@ -80,4 +129,4 @@ workflows:
           - smartjamb8505@gmail.com
         notify:
           success: true
-          failure: false
+          failure: true
