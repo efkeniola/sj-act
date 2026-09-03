@@ -3,7 +3,7 @@ workflows:
   # ─────────────────────────────────────────────
   # 1. ANDROID RELEASE  (APK + AAB)
   # ─────────────────────────────────────────────
-  android-release:
+  sj-act-android-release:
     name: SJ ACT — Android Release
     max_build_duration: 60
     instance_type: mac_mini_m2
@@ -11,9 +11,6 @@ workflows:
     environment:
       groups:
         - sj_act_secrets
-      vars:
-        FLUTTER_VERSION: "3.24.0"
-        JAVA_VERSION: "17"
       flutter: default
       java: 17
 
@@ -31,17 +28,22 @@ workflows:
         script: |
           mkdir -p $CM_BUILD_DIR/android/keystore
 
-          # Decode base64 keystore into the correct location
-          echo $CM_KEYSTORE_BASE64 | base64 --decode \
+          # printf avoids echo adding newlines that corrupt base64 decoding
+          printf '%s' "$CM_KEYSTORE_BASE64" | base64 --decode \
             > $CM_BUILD_DIR/android/keystore/sj_act_release.jks
 
-          # Write key.properties (never committed to git)
-          cat > $CM_BUILD_DIR/android/key.properties <<EOF
-          storePassword=$CM_KEYSTORE_PASSWORD
-          keyPassword=$CM_KEY_PASSWORD
-          keyAlias=$CM_KEY_ALIAS
-          storeFile=../keystore/sj_act_release.jks
-          EOF
+          # Verify the keystore decoded correctly
+          keytool -list \
+            -keystore $CM_BUILD_DIR/android/keystore/sj_act_release.jks \
+            -storepass "$CM_KEYSTORE_PASSWORD" | grep "Alias name"
+
+          # Write key.properties — indentation matters, no leading spaces
+          cat > $CM_BUILD_DIR/android/key.properties << KEYEOF
+storePassword=$CM_KEYSTORE_PASSWORD
+keyPassword=$CM_KEY_PASSWORD
+keyAlias=$CM_KEY_ALIAS
+storeFile=../keystore/sj_act_release.jks
+KEYEOF
 
       - name: Get Flutter packages
         script: |
@@ -51,7 +53,7 @@ workflows:
       - name: Run tests
         script: |
           cd $CM_BUILD_DIR
-          flutter test || true   # remove "|| true" if you want failed tests to stop the build
+          flutter test || true
 
       - name: Build APK (release)
         script: |
@@ -68,7 +70,6 @@ workflows:
     artifacts:
       - build/app/outputs/flutter-apk/app-release.apk
       - build/app/outputs/bundle/release/app-release.aab
-      - flutter_drive.log
 
     publishing:
       email:
@@ -81,14 +82,14 @@ workflows:
       # ── Uncomment when ready to publish to Play Store ──
       # google_play:
       #   credentials: $GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
-      #   track: internal          # internal → alpha → beta → production
+      #   track: internal
       #   submit_as_draft: true
 
 
   # ─────────────────────────────────────────────
   # 2. ANDROID DEBUG  (quick test builds)
   # ─────────────────────────────────────────────
-  android-debug:
+  sj-act-android-debug:
     name: SJ ACT — Android Debug
     max_build_duration: 30
     instance_type: mac_mini_m2
