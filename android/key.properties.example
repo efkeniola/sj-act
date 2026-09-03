@@ -1,0 +1,17 @@
+# Copy this file to key.properties (kept OUT of version control) for LOCAL
+# release builds only. On Codemagic, this file is generated automatically
+# from the encrypted CM_KEYSTORE_PASSWORD / CM_KEY_ALIAS / CM_KEY_PASSWORD
+# environment group — see codemagic.yaml.
+#
+# Generate your keystore (run once):
+#   keytool -genkey -v \
+#     -keystore ../keystore/sj_act_release.jks \
+#     -alias sj_act \
+#     -keyalg RSA -keysize 2048 -validity 10000 \
+#     -storepass "smartjamb@8505" -keypass "smartjamb@8505" \
+#     -dname "CN=SmartJAMB ACT, OU=SmartJAMB, O=SmartJAMB, L=Lagos, S=Lagos, C=NG"
+
+storePassword=smartjamb@8505
+keyPassword=smartjamb@8505
+keyAlias=sj_act
+storeFile=../keystore/sj_act_release.jks

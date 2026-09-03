@@ -1,0 +1,6 @@
+# Copy to local.properties and set your local Flutter/Android SDK paths.
+# Not needed on Codemagic — it sets these automatically.
+# Do NOT commit local.properties to git.
+
+flutter.sdk=/path/to/flutter
+sdk.dir=/path/to/Android/sdk

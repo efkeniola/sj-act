@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ACT brand red (#B30000) splash background.
+     Shown from cold-start until Flutter renders its first frame,
+     which means it appears for < 300 ms on modern devices. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#B30000"/>
+        </shape>
+    </item>
+</layer-list>

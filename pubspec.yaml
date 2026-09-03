@@ -1,0 +1,68 @@
+name: sj_act
+description: SJ ACT - SmartJAMB ACT Prep App
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # UI
+  cupertino_icons: ^1.0.8
+
+  # Storage
+  shared_preferences: ^2.3.2
+  sqflite: ^2.4.2
+  path: ^1.9.0
+  path_provider: ^2.1.4
+  flutter_secure_storage: ^9.2.2
+
+  # Network
+  http: ^1.2.2
+
+  # Device identity (for activation)
+  device_info_plus: ^11.3.0
+  crypto: ^3.0.6
+
+  # Deep linking / external URLs (activation store, support email)
+  url_launcher: ^6.3.1
+
+  # Charts / analytics
+  fl_chart: ^0.70.2
+
+  # IDs
+  uuid: ^4.5.1
+
+  # WiFi Challenge — NSD (Network Service Discovery)
+  # On pub.dev as "nsd" — works on Android & iOS, wraps NsdManager / NSNetService
+  nsd: ^4.0.4
+
+  # Voice reading (TTS) — reads questions aloud, works fully offline
+  flutter_tts: ^4.2.0
+
+  # Spoken-answer detection (STT) — detects "A/B/C/D" from the microphone
+  speech_to_text: ^7.0.0
+
+  # Runtime permissions (microphone for STT, nearby WiFi for NSD)
+  permission_handler: ^11.3.1
+
+  # package info for about screen
+  package_info_plus: ^8.1.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+dependency_overrides:
+  # Keeps material_color_utilities consistent across the tree.
+  # Update this when the Flutter SDK itself moves to a newer version.
+  material_color_utilities: ^0.12.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/

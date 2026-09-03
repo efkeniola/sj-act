@@ -1,0 +1,83 @@
+workflows:
+  sj-act-android-release:
+    name: SJ ACT — Android Release
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+
+    environment:
+      groups:
+        - sj_act_secrets          # group name in Codemagic dashboard
+      vars:
+        PACKAGE_NAME: "com.sj_act"
+        FLUTTER_VERSION: "3.22.0"
+      flutter: 3.22.0
+      java: 17
+      android_signing:
+        - sj_act_keystore
+
+    scripts:
+      - name: Get dependencies
+        script: flutter pub get
+
+      - name: Run analyzer
+        script: flutter analyze --no-fatal-infos
+
+      - name: Build APK (release, with API key injected)
+        script: |
+          flutter build apk --release \
+            --dart-define=ACT_API_KEY=$SJACT_API_KEY \
+            --build-name=$(cat pubspec.yaml | grep "^version:" | sed 's/version: //' | cut -d'+' -f1) \
+            --build-number=$CM_BUILD_NUMBER
+
+      - name: Build AAB (Google Play)
+        script: |
+          flutter build appbundle --release \
+            --dart-define=ACT_API_KEY=$SJACT_API_KEY \
+            --build-name=$(cat pubspec.yaml | grep "^version:" | sed 's/version: //' | cut -d'+' -f1) \
+            --build-number=$CM_BUILD_NUMBER
+
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk
+      - build/app/outputs/bundle/release/app-release.aab
+      - flutter_drive.log
+
+    publishing:
+      email:
+        recipients:
+          - smartjamb8505@gmail.com
+        notify:
+          success: true
+          failure: true
+
+  sj-act-android-debug:
+    name: SJ ACT — Android Debug
+    max_build_duration: 30
+    instance_type: mac_mini_m2
+
+    environment:
+      groups:
+        - sj_act_secrets
+      vars:
+        PACKAGE_NAME: "com.sj_act"
+      flutter: 3.22.0
+      java: 17
+
+    scripts:
+      - name: Get dependencies
+        script: flutter pub get
+
+      - name: Build debug APK
+        script: |
+          flutter build apk --debug \
+            --dart-define=ACT_API_KEY=$SJACT_API_KEY_DEV
+
+    artifacts:
+      - build/app/outputs/flutter-apk/app-debug.apk
+
+    publishing:
+      email:
+        recipients:
+          - smartjamb8505@gmail.com
+        notify:
+          success: true
+          failure: false
