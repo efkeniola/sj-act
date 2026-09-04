@@ -27,23 +27,9 @@ workflows:
       - name: Set up keystore
         script: |
           mkdir -p $CM_BUILD_DIR/android/keystore
-
-          # printf avoids echo adding newlines that corrupt base64 decoding
-          printf '%s' "$CM_KEYSTORE_BASE64" | base64 --decode \
-            > $CM_BUILD_DIR/android/keystore/sj_act_release.jks
-
-          # Verify the keystore decoded correctly
-          keytool -list \
-            -keystore $CM_BUILD_DIR/android/keystore/sj_act_release.jks \
-            -storepass "$CM_KEYSTORE_PASSWORD" | grep "Alias name"
-
-          # Write key.properties — indentation matters, no leading spaces
-          cat > $CM_BUILD_DIR/android/key.properties << KEYEOF
-storePassword=$CM_KEYSTORE_PASSWORD
-keyPassword=$CM_KEY_PASSWORD
-keyAlias=$CM_KEY_ALIAS
-storeFile=../keystore/sj_act_release.jks
-KEYEOF
+          printf '%s' "$CM_KEYSTORE_BASE64" | base64 --decode > $CM_BUILD_DIR/android/keystore/sj_act_release.jks
+          keytool -list -keystore $CM_BUILD_DIR/android/keystore/sj_act_release.jks -storepass "$CM_KEYSTORE_PASSWORD" | grep "Alias name"
+          printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=../keystore/sj_act_release.jks\n' "$CM_KEYSTORE_PASSWORD" "$CM_KEY_PASSWORD" "$CM_KEY_ALIAS" > $CM_BUILD_DIR/android/key.properties
 
       - name: Get Flutter packages
         script: |
@@ -58,14 +44,12 @@ KEYEOF
       - name: Build APK (release)
         script: |
           cd $CM_BUILD_DIR
-          flutter build apk --release \
-            --dart-define=ACT_API_KEY=$ACT_API_KEY
+          flutter build apk --release --dart-define=ACT_API_KEY=$ACT_API_KEY
 
       - name: Build App Bundle / AAB (release)
         script: |
           cd $CM_BUILD_DIR
-          flutter build appbundle --release \
-            --dart-define=ACT_API_KEY=$ACT_API_KEY
+          flutter build appbundle --release --dart-define=ACT_API_KEY=$ACT_API_KEY
 
     artifacts:
       - build/app/outputs/flutter-apk/app-release.apk
@@ -78,12 +62,6 @@ KEYEOF
         notify:
           success: true
           failure: true
-
-      # ── Uncomment when ready to publish to Play Store ──
-      # google_play:
-      #   credentials: $GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
-      #   track: internal
-      #   submit_as_draft: true
 
 
   # ─────────────────────────────────────────────
@@ -118,8 +96,7 @@ KEYEOF
       - name: Build debug APK
         script: |
           cd $CM_BUILD_DIR
-          flutter build apk --debug \
-            --dart-define=ACT_API_KEY=$ACT_API_KEY
+          flutter build apk --debug --dart-define=ACT_API_KEY=$ACT_API_KEY
 
     artifacts:
       - build/app/outputs/flutter-apk/app-debug.apk
