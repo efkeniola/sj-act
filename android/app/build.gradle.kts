@@ -23,7 +23,7 @@ android {
     // apps and updates as of Aug 31 2026. Do not lower without checking the
     // current Play Console requirement first.
     compileSdk = 36
-    ndkVersion = "27.0.12077973"
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
