@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 enum OnlineChallengeRegion { usa, foreign }
 
@@ -50,42 +52,205 @@ class _OpponentProfile {
 class FakeOnlineChallenge {
   static final _rng = Random();
 
+  // ── "Feels like a real person" freshness pools ─────────────────────────────
+  // Real opponents don't reappear seconds after you last saw them, and a real
+  // person doesn't say the exact same line twice in a row. These two pools
+  // remember what was recently used and steer future picks away from it for
+  // a random cool-down window, so the same name or line won't resurface for
+  // a while — without ever permanently banning anything (if the whole pool
+  // is on cooldown we just fall back to using it anyway).
+  //
+  // Opponent names persist across app restarts (SharedPreferences) since a
+  // 30–60 minute memory should survive the app being closed and reopened.
+  // Chat/opening/closing lines only need to avoid repeating within the
+  // current session, so those stay in memory only.
+  static SharedPreferences? _prefsCache;
+  static Future<SharedPreferences> _prefs() async =>
+      _prefsCache ??= await SharedPreferences.getInstance();
+
+  static const _nameCooldownKey = 'sj_act_recent_opponent_names_v1';
+  static Map<String, int>? _nameCooldownCache;
+
+  static Future<Map<String, int>> _loadNameCooldowns() async {
+    if (_nameCooldownCache != null) return _nameCooldownCache!;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    var result = <String, int>{};
+    try {
+      final p = await _prefs();
+      final raw = p.getString(_nameCooldownKey);
+      if (raw != null) {
+        final map = jsonDecode(raw) as Map<String, dynamic>;
+        map.forEach((k, v) {
+          final exp = v is int ? v : int.tryParse(v.toString()) ?? 0;
+          if (exp > now) result[k] = exp;
+        });
+      }
+    } catch (_) {}
+    _nameCooldownCache = result;
+    return result;
+  }
+
+  static Future<void> _saveNameCooldowns() async {
+    if (_nameCooldownCache == null) return;
+    try {
+      final p = await _prefs();
+      await p.setString(_nameCooldownKey, jsonEncode(_nameCooldownCache));
+    } catch (_) {}
+  }
+
+  /// Picks a name from [pool] that hasn't been used as an opponent in the
+  /// last 30–60 minutes (randomised per pick, just like the rest of this
+  /// file's "feels human" timing), then puts it on cooldown for a fresh
+  /// random 30–60 minute window.
+  static Future<String> _pickFreshName(List<String> pool) async {
+    final cooldowns = await _loadNameCooldowns();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    var available = pool.where((n) => (cooldowns[n] ?? 0) <= now).toList();
+    if (available.isEmpty) available = pool; // pool exhausted — better a repeat than nobody
+    final name = available[_rng.nextInt(available.length)];
+    final minutes = 30 + _rng.nextInt(31); // 30–60 minutes
+    cooldowns[name] = now + minutes * 60 * 1000;
+    if (cooldowns.length > 600) {
+      cooldowns.removeWhere((_, v) => v <= now); // periodic housekeeping
+    }
+    unawaited(_saveNameCooldowns());
+    return name;
+  }
+
+  // In-memory only — chat lines just need to avoid repeating within the
+  // current session, not across app restarts.
+  static final Map<String, int> _recentMessages = {};
+
+  static String _pickFreshMessage(List<String> pool, {int minMinutes = 20, int maxMinutes = 40}) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    var available = pool.where((m) => (_recentMessages[m] ?? 0) <= now).toList();
+    if (available.isEmpty) available = pool;
+    final msg = available[_rng.nextInt(available.length)];
+    final minutes = minMinutes + _rng.nextInt(maxMinutes - minMinutes + 1);
+    _recentMessages[msg] = now + minutes * 60 * 1000;
+    if (_recentMessages.length > 400) {
+      _recentMessages.removeWhere((_, v) => v <= now);
+    }
+    return msg;
+  }
+
   // ── Name pools ─────────────────────────────────────────────────────────────
-  static const _usaNames = [
-    "AidanR_ACT", "AlexandraH", "AndrewK_99", "AshleyM_Pro", "AuroraBell",
-    "BeatrizV_ACT", "BenjaminF", "BriannaC", "CalebWright", "CarolineS",
-    "CharlotteM", "ChristianB", "CooperLane", "DakotaHill", "DanielleP",
-    "DerekACT26", "EthanThomas", "EvelynNash", "FinnleyR", "GabrielleH",
-    "GraceLinton", "HannahPark", "HarperEllis", "HaydenWolf", "IsabellaC",
-    "JacksonB_99", "JadenACT", "JasmineWu", "JuliaFord", "KaileyBrown",
-    "KathrynV", "KevinMoore", "LandonS_ACT", "LaurenBach", "LilyOwen",
-    "LoganGrant", "LucasACT35", "MadisonHall", "MasonPrice", "MeganACT",
-    "MiloFischer", "NatalieCox", "NathanielP", "NoahACT36", "OliviaKing",
-    "ParkerReed", "PenelopeW", "QuinnMorris", "RebeccaACT", "RileySTEM",
-    "RyanTurner", "SamanthaL", "SarahACT34", "SkylerHunt", "SofiaJames",
-    "SpencerACT", "TaylorBritt", "TristanACT", "VioletShaw", "WillowACT",
-    "XanderPro", "YasmineStar", "ZacharyR35", "ZoeyACT_Top", "AmeliaFox",
-    "BradleyACT", "CassandraW", "DominicACT", "EleanorS_36", "FelixTopACT",
-    "GeorgiaACT", "HudsonElite", "IvyTopScore", "JadaACT_Pro", "KendallW",
-    "LeahACT_35", "MarcellaT", "NicholasW", "OscarRivera", "PaigeTurner",
-    "RolandACT", "ScarlettR36", "SebastianH", "StellaACTTop", "TheodoreW",
-    "UrielACT35", "VanessaACT", "WestonElite", "XimenaTop", "YolandaACT",
-    "ZephyrACT36", "AbigailACT", "BroderickP", "CeliaACTTop", "DexterACT",
-    "EthanF_ACT", "FinnACT_US", "GwendolynS", "HectorR_ACT", "IrinaACT35",
+  // Built programmatically from first-name × surname/tag pools instead of one
+  // giant hand-typed list, so each room has hundreds of distinct-looking
+  // opponent names without repeating the same handful over and over.
+  static final List<String> _usaNames = _buildUsaNamePool();
+  static final List<String> _foreignNames = _buildForeignNamePool();
+
+  static const List<String> _usaFirstNames = [
+    "Aidan", "Alexandra", "Andrew", "Ashley", "Aurora", "Beatriz", "Benjamin",
+    "Brianna", "Caleb", "Caroline", "Charlotte", "Christian", "Cooper",
+    "Dakota", "Danielle", "Derek", "Ethan", "Evelyn", "Finnley", "Gabrielle",
+    "Grace", "Hannah", "Harper", "Hayden", "Isabella", "Jackson", "Jaden",
+    "Jasmine", "Julia", "Kailey", "Kathryn", "Kevin", "Landon", "Lauren",
+    "Lily", "Logan", "Lucas", "Madison", "Mason", "Megan", "Milo", "Natalie",
+    "Nathaniel", "Noah", "Olivia", "Parker", "Penelope", "Quinn", "Rebecca",
+    "Riley", "Ryan", "Samantha", "Sarah", "Skyler", "Sofia", "Spencer",
+    "Taylor", "Tristan", "Violet", "Willow", "Xander", "Yasmine", "Zachary",
+    "Zoey", "Amelia", "Bradley", "Cassandra", "Dominic", "Eleanor", "Felix",
+    "Georgia", "Hudson", "Ivy", "Jada", "Kendall", "Leah", "Marcella",
+    "Nicholas", "Oscar", "Paige", "Roland", "Scarlett", "Sebastian", "Stella",
+    "Theodore", "Uriel", "Vanessa", "Weston", "Ximena", "Yolanda", "Zephyr",
+    "Abigail", "Broderick", "Celia", "Dexter", "Gwendolyn", "Hector", "Irina",
+    "Jordan", "Kyle",
   ];
 
-  static const _foreignNames = [
-    "LiamUK_ACT", "EmmaCA_Pro", "OliviaNZ35", "NathanDE_A", "SofiaFR_ACT",
-    "LucasAU36", "MeiJP_Top", "PriyaIN_ACT", "RajGlobal35", "AnastasiaRU",
-    "YukiJP_Pro", "PierreF_ACT", "HansDE_36", "FreyaNZ_ACT", "CarlosES35",
-    "GretaSE_ACT", "SvenNO_Pro", "IsabelCN35", "KenjiJP35", "LaylaUAE_ACT",
-    "ValentinaIT", "DiegoMX_ACT", "AnaGR_ACT35", "IvanPL_ACT", "BiancaBR35",
-    "MatthewCA35", "OscarDE_ACT", "ChloeAU_Pro", "NicolasF_ACT", "AmeliaUK35",
-    "HarrisNZ_36", "SophieIN_ACT", "MarcAU_ACT", "RosaES_Pro", "KlausDE36",
-    "AnnaSE_ACT", "MiguelMX35", "LinCN_ACT35", "YuriRU_Pro", "AishaBR35",
-    "FerdinandPH", "VictoriaAR", "TakeshiJP35", "BeatriceIT", "ArjunIN35",
-    "ZaraUK_ACT", "PhilippeF35", "AkiraJP36", "ElenaRU_Pro", "RuiCN_ACT",
+  static const List<String> _usaSurnameTags = [
+    "Reed", "Hart", "Wright", "Stone", "Bell", "Ford", "Brown", "Moore",
+    "Bach", "Owen", "Grant", "Hall", "Price", "Cox", "King", "Morris",
+    "Turner", "Hunt", "James", "Britt", "Shaw", "Fox", "Ward", "Rivera",
+    "Elite", "Pro", "ACT", "Top", "STEM", "35", "36", "99", "26", "2026",
+    "_US", "X", "Star",
   ];
+
+  static List<String> _buildUsaNamePool() {
+    final result = <String>[];
+    for (final first in _usaFirstNames) {
+      for (final tag in _usaSurnameTags) {
+        result.add('$first$tag');
+      }
+    }
+    return result;
+  }
+
+  static const List<String> _foreignFirstNames = [
+    "Liam", "Emma", "Olivia", "Nathan", "Sofia", "Lucas", "Mei", "Priya",
+    "Raj", "Anastasia", "Yuki", "Pierre", "Hans", "Freya", "Carlos", "Greta",
+    "Sven", "Isabel", "Kenji", "Layla", "Valentina", "Diego", "Ana", "Ivan",
+    "Bianca", "Matthew", "Oscar", "Chloe", "Nicolas", "Amelia", "Harris",
+    "Sophie", "Marc", "Rosa", "Klaus", "Anna", "Miguel", "Lin", "Yuri",
+    "Aisha", "Ferdinand", "Victoria", "Takeshi", "Beatrice", "Arjun", "Zara",
+    "Philippe", "Akira", "Elena", "Rui", "Noor", "Mateus", "Ingrid", "Dmitri",
+    "Camila", "Youssef", "Katarina", "Tomas", "Alina", "Rafael", "Mira",
+  ];
+
+  static const List<String> _foreignCountryTags = [
+    "UK", "CA", "NZ", "DE", "FR", "AU", "JP", "IN", "RU", "ES", "SE", "NO",
+    "CN", "AE", "IT", "MX", "GR", "PL", "BR", "PH", "AR", "KR", "NL", "CH",
+    "PT",
+  ];
+
+  static const List<String> _foreignFlairTags = [
+    "", "_ACT", "_Pro", "35", "36", "_Top", "_Global",
+  ];
+
+  static List<String> _buildForeignNamePool() {
+    final result = <String>[];
+    for (final first in _foreignFirstNames) {
+      for (final code in _foreignCountryTags) {
+        final flair = _foreignFlairTags[(first.length + code.length) % _foreignFlairTags.length];
+        result.add('$first$code$flair');
+      }
+    }
+    return result;
+  }
+
+  // ── Free-form chat replies ─────────────────────────────────────────────────
+  // Instead of picking from one short fixed list (which repeats fast),
+  // replies are assembled from three independent phrase banks. That gives
+  // thousands of distinct combinations, so a real back-and-forth chat never
+  // sounds like it's playing back the same handful of lines.
+  static const List<String> _replyOpeners = [
+    "Ha!", "Nice.", "For real?", "Haha", "Okay", "Solid.", "Word.",
+    "Respect.", "Bet.", "True.", "Fair enough.", "Same here.", "Real talk.",
+    "Facts.", "I hear you.", "Makes sense.", "Good point.", "Interesting.",
+    "Right?", "Totally.", "For sure.", "Yep.", "Definitely.", "Agreed.",
+    "Lol.", "Oh really?", "Fair.", "Noted.", "Gotcha.", "Hah, fair.",
+  ];
+
+  static const List<String> _replyMiddles = [
+    "good luck out there", "let's see how this goes", "this should be fun",
+    "may the best score win", "ready when you are", "let's get into it",
+    "hope you studied", "I've been grinding for this", "bring your A-game",
+    "let's make it a good one", "here we go", "let's do this thing",
+    "time to lock in", "focus mode on", "no pressure, okay maybe a little",
+    "let's see who's sharper today", "game time", "let's find out",
+    "curious how this plays out", "should be a good match",
+    "I've got my calculator ready", "let's keep it clean",
+    "may the odds be in your favor", "hope your wifi holds up",
+    "this is going to be close I bet", "let's see those brain cells work",
+  ];
+
+  static const List<String> _replyClosers = [
+    "!", ".", " 😅", " lol", " haha", "!!", "...", " for real", " though",
+    " honestly", "", "", "", "",
+  ];
+
+  /// Returns a random, natural-sounding chat reply assembled from the three
+  /// phrase banks above (openers × middles × closers = 4,000+ combinations).
+  static String randomChatReply() {
+    // Openers and middles are picked fresh (not repeated for a while) so
+    // back-to-back replies never feel like they're playing back the same
+    // line; closers are tiny flourishes so they're left free to repeat.
+    final opener = _pickFreshMessage(_replyOpeners, minMinutes: 3, maxMinutes: 12);
+    final middle = _pickFreshMessage(_replyMiddles, minMinutes: 15, maxMinutes: 35);
+    final closer = _replyClosers[_rng.nextInt(_replyClosers.length)];
+    return '$opener ${middle[0].toUpperCase()}${middle.substring(1)}$closer';
+  }
 
   // ── Time-of-day activity model ─────────────────────────────────────────────
   /// Returns a multiplier (0.05–1.0) representing how many players are
@@ -234,7 +399,7 @@ class FakeOnlineChallenge {
     }
 
     final pool = region == OnlineChallengeRegion.usa ? _usaNames : _foreignNames;
-    yield 'joined:${pool[_rng.nextInt(pool.length)]}';
+    yield 'joined:${await _pickFreshName(pool)}';
   }
 
   static Stream<String> joinMatch(OnlineChallengeRegion region) async* {
@@ -249,7 +414,7 @@ class FakeOnlineChallenge {
     if (_rng.nextDouble() < noMatchChance) { yield 'no_open_match'; return; }
 
     final pool = region == OnlineChallengeRegion.usa ? _usaNames : _foreignNames;
-    yield 'joined:${pool[_rng.nextInt(pool.length)]}';
+    yield 'joined:${await _pickFreshName(pool)}';
   }
 
   static int _waitSeconds(double activity) {
@@ -323,6 +488,67 @@ class FakeOnlineChallenge {
   /// Whether the opponent is correct on this question.
   static bool opponentIsCorrect(_OpponentProfile profile) {
     return _rng.nextDouble() < profile.accuracy;
+  }
+
+  // ── Per-question opponent session (fixes a bug where re-simulating the
+  // whole match from question 0 every round produced impossible progress
+  // numbers, e.g. "2 correct out of 1 answered") ─────────────────────────────
+  static final Map<int, _OpponentProfile> _sessionProfiles = {};
+  static int _nextSessionId = 1;
+
+  /// Call once when a live match begins. Returns an opaque session id that
+  /// keeps the opponent's "personality" (speed, accuracy, skip/AFK
+  /// tendencies) consistent across every question in that match, instead of
+  /// re-rolling it (and re-simulating from scratch) each round.
+  static int startOpponentSession() {
+    final id = _nextSessionId++;
+    _sessionProfiles[id] = _pickPersonality();
+    return id;
+  }
+
+  static void endOpponentSession(int sessionId) {
+    _sessionProfiles.remove(sessionId);
+  }
+
+  /// Simulates the opponent working exactly ONE question (thinking, maybe
+  /// going AFK, then answering or skipping) using the personality picked
+  /// for [sessionId]. Call this fresh for every question the player is on —
+  /// it does not loop over the whole match, so it can't drift out of sync
+  /// with which question is actually on screen.
+  static Stream<OpponentEvent> opponentAnswerForQuestion({
+    required int sessionId,
+    required int qIndex,
+    required int totalQuestions,
+  }) async* {
+    final profile = _sessionProfiles[sessionId] ?? _pickPersonality();
+
+    yield OpponentEvent.thinking(questionIndex: qIndex);
+
+    final afkSec = opponentAfkDuration(profile);
+    if (afkSec != null) {
+      yield OpponentEvent.afk(seconds: afkSec);
+      await Future.delayed(Duration(seconds: afkSec));
+    }
+
+    final thinkSec = opponentThinkSeconds(profile: profile, qIndex: qIndex, totalQuestions: totalQuestions);
+    await Future.delayed(Duration(seconds: thinkSec));
+
+    // NOTE: this used to also roll an independent opponentSkipsQuestion()
+    // chance here and yield a "skipped" event on its own, completely
+    // separate from the actual per-question clock the player sees. That
+    // meant the opponent could show as having "skipped" a question at, say,
+    // 8 seconds into a 60-second timer, for no visible reason — which
+    // isn't how a real opponent works: they only miss a question because
+    // the clock actually ran out, not because of some independent internal
+    // coin flip. The only place a skip should ever come from is the match
+    // screen's own timeout handling (_forceAdvanceOnTimeout), which already
+    // covers "they were too slow" naturally via how long thinkSec/afkSec
+    // above can run — a genuinely slow or distracted profile will
+    // sometimes still be mid-thought when the real timer hits zero, and
+    // that's scored as a timeout there. This function itself now always
+    // resolves to an actual answer.
+    final isCorrect = opponentIsCorrect(profile);
+    yield OpponentEvent.answered(questionIndex: qIndex, answeredSoFar: 0, isCorrect: isCorrect);
   }
 
   // ── Full match simulation ──────────────────────────────────────────────────
@@ -441,7 +667,7 @@ class FakeOnlineChallenge {
     else if (isEvening)   pool = eveningMessages;
     else                  pool = defaultMessages;
 
-    return pool[_rng.nextInt(pool.length)];
+    return _pickFreshMessage(pool);
   }
 
   /// Returns a reaction from the opponent after the match ends.
@@ -461,15 +687,20 @@ class FakeOnlineChallenge {
       "Solid. I\'ll do better next time.",
     ];
     final pool = opponentWon ? wonMessages : lostMessages;
-    return pool[_rng.nextInt(pool.length)];
+    return _pickFreshMessage(pool);
   }
 
   // ── Bet proposals ──────────────────────────────────────────────────────────
-  static ChallengeBetProposal? fakeOpponentBetProposal() {
-    // 55% chance at high activity, 30% late night (distracted opponents don't bother)
-    final activity = _activityFactor();
-    final proposalChance = 0.30 + activity * 0.25;
-    if (_rng.nextDouble() > proposalChance) return null;
+  static ChallengeBetProposal? fakeOpponentBetProposal({bool guaranteed = false}) {
+    if (!guaranteed) {
+      // 55% chance at high activity, up to 90% at peak — bumped up from the
+      // original 30-55% because compounded with an outer "does the host even
+      // consider it" check elsewhere, bets were showing up far too rarely to
+      // ever be seen in normal testing.
+      final activity = _activityFactor();
+      final proposalChance = 0.55 + activity * 0.35;
+      if (_rng.nextDouble() > proposalChance) return null;
+    }
 
     final bets = [
       ChallengeBetProposal(
@@ -491,6 +722,16 @@ class FakeOnlineChallenge {
         type: 'ranking_reset',
         value: 'top10_slot',
         description: 'Loser drops one leaderboard tier for this session.',
+      ),
+      ChallengeBetProposal(
+        type: 'bragging_rights',
+        value: 'top_challenger',
+        description: 'Winner gets pinned as "Top Challenger" in the room for the rest of the day.',
+      ),
+      ChallengeBetProposal(
+        type: 'study_task',
+        value: 'extra_set',
+        description: 'Loser has to finish one extra practice set before their next Online Challenge.',
       ),
     ];
     return bets[_rng.nextInt(bets.length)];
@@ -544,6 +785,13 @@ class FakeOnlineChallenge {
     final pct = totalQuestions == 0 ? 0.0 : correct / totalQuestions;
     final actScore = (1 + pct * 35).clamp(1.0, 36.0);
     yield OpponentEvent.finished(actScore: actScore, totalAnswered: answered);
+  }
+
+  /// Returns a shuffled sample of [count] unique display names pooled from
+  /// both the USA and Foreign name pools — used by the Active Rooms browser.
+  static List<String> sampleRoomNames(int count) {
+    final pool = [..._usaNames, ..._foreignNames]..shuffle(_rng);
+    return pool.take(count).toList();
   }
 
   /// Return a descriptive status label for the UI based on current activity.

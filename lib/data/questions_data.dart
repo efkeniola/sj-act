@@ -3622,3 +3622,15 @@ Map<ActSection, List<ActQuestion>> allQuestionsSet1 = {
 List<ActQuestion> questionsForSection(ActSection section) {
   return allQuestionsSet1[section] ?? [];
 }
+
+/// Every question from every section pooled together — used by the
+/// "Random Mix" subject option (Online Challenge & WiFi Challenge) so a
+/// session can pull questions across subjects instead of just one.
+List<ActQuestion> questionsForRandomMix() {
+  return [
+    ...englishSet1,
+    ...mathSet1,
+    ...readingSet1,
+    ...scienceSet1,
+  ];
+}

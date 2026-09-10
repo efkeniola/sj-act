@@ -135,7 +135,12 @@ class _ExamModeScreenState extends State<ExamModeScreen> {
           if (mounted) _launchExam(settings);
         },
         onCancel: () {
-          if (mounted) Navigator.pop(context);
+          // Close the setup dialog, then also leave the Full ACT Exam
+          // screen itself (it has no content of its own — it only ever
+          // shows this dialog) so Cancel actually returns to Home instead
+          // of leaving a spinner stuck on screen forever.
+          Navigator.of(context).pop(); // dismiss the dialog
+          if (mounted) Navigator.of(context).pop(); // back to Home
         },
       ),
     );
@@ -821,8 +826,9 @@ class _FullExamSessionState extends State<_FullExamSession> {
       onResult: (letter) {
         if (mounted) setState(() { _listening = false; _selectAnswer(letter); });
       },
-      onUnrecognised: () {
+      onUnrecognised: (reason) {
         if (mounted) setState(() => _listening = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(reason)));
       },
     );
   }
@@ -839,6 +845,8 @@ class _FullExamSessionState extends State<_FullExamSession> {
     final newVal = !_micEnabled;
     await VoiceService.instance.setSttEnabled(newVal);
     setState(() => _micEnabled = newVal);
+    // Enabling the mic should start listening immediately in the same tap.
+    if (newVal) _startListening();
   }
 
   void _startSection() {
@@ -914,10 +922,14 @@ class _FullExamSessionState extends State<_FullExamSession> {
 
   void _prevQuestion() {
     if (_questionIndex > 0) {
+      // Same rule as _nextQuestion: in 'end' reveal mode (real ACT mode),
+      // correct/incorrect must never be shown until the results screen —
+      // not even for questions already answered when navigating back.
+      final revealNow = widget.settings.answerReveal != 'end';
       setState(() {
         _questionIndex--;
         _selectedAnswer = _sectionAnswers[_sectionIndex]?[_questionIndex];
-        _showFeedback = _sectionAnswers[_sectionIndex]?.containsKey(_questionIndex) ?? false;
+        _showFeedback = revealNow && (_sectionAnswers[_sectionIndex]?.containsKey(_questionIndex) ?? false);
       });
       _pageCtrl.previousPage(duration: const Duration(milliseconds: 200), curve: Curves.easeInOut);
     }
@@ -1225,33 +1237,40 @@ class _FullExamSessionState extends State<_FullExamSession> {
       child: Scaffold(
         appBar: AppBar(
           automaticallyImplyLeading: false,
-          title: Row(children: [
-            // Section tabs
-            ...List.generate(widget.sections.length, (i) {
-              final s = widget.sections[i];
-              final isCurrent = i == _sectionIndex;
-              final isDone = i < _sectionIndex;
-              return Container(
-                margin: const EdgeInsets.only(right: 6),
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: isCurrent
-                      ? Colors.white.withOpacity(0.25)
-                      : (isDone ? Colors.white.withOpacity(0.10) : Colors.transparent),
-                  borderRadius: BorderRadius.circular(6),
-                  border: isCurrent ? Border.all(color: Colors.white38) : null,
-                ),
-                child: Text(
-                  actSectionDisplayName(s.section).split(' ').first,
-                  style: TextStyle(
-                    color: isCurrent ? Colors.white : (isDone ? Colors.white60 : Colors.white38),
-                    fontSize: 11,
-                    fontWeight: isCurrent ? FontWeight.w800 : FontWeight.w500,
+          // Wrapped in a horizontal scroll view so the section tabs never
+          // overflow the AppBar title's width on narrower phones (this Row
+          // used to be sized to its natural (unbounded) width, which is what
+          // caused the "RenderFlex overflowed" error on the exam screen).
+          title: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              // Section tabs
+              ...List.generate(widget.sections.length, (i) {
+                final s = widget.sections[i];
+                final isCurrent = i == _sectionIndex;
+                final isDone = i < _sectionIndex;
+                return Container(
+                  margin: const EdgeInsets.only(right: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: isCurrent
+                        ? Colors.white.withOpacity(0.25)
+                        : (isDone ? Colors.white.withOpacity(0.10) : Colors.transparent),
+                    borderRadius: BorderRadius.circular(6),
+                    border: isCurrent ? Border.all(color: Colors.white38) : null,
                   ),
-                ),
-              );
-            }),
-          ]),
+                  child: Text(
+                    actSectionDisplayName(s.section).split(' ').first,
+                    style: TextStyle(
+                      color: isCurrent ? Colors.white : (isDone ? Colors.white60 : Colors.white38),
+                      fontSize: 11,
+                      fontWeight: isCurrent ? FontWeight.w800 : FontWeight.w500,
+                    ),
+                  ),
+                );
+              }),
+            ]),
+          ),
           actions: [
             // Timer
             Container(
@@ -1343,7 +1362,10 @@ class _FullExamSessionState extends State<_FullExamSession> {
                       return _QuestionPage(
                         question: question,
                         selectedAnswer: isCurrent ? _selectedAnswer : _sectionAnswers[_sectionIndex]?[i],
-                        showFeedback: isCurrent ? _showFeedback : (_sectionAnswers[_sectionIndex]?.containsKey(i) ?? false),
+                        showFeedback: isCurrent
+                            ? _showFeedback
+                            : (widget.settings.answerReveal != 'end' &&
+                                (_sectionAnswers[_sectionIndex]?.containsKey(i) ?? false)),
                         onSelect: isCurrent ? _selectAnswer : null,
                         isDark: isDark,
                       );

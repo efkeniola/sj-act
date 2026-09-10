@@ -58,10 +58,10 @@ class _HomeScreenState extends State<HomeScreen> {
       _displayName = name ?? 'there';
       _standardActive =
           statuses[AppConstants.catStandard]?.isFullyActive ?? false;
-      _onlineActive =
-          statuses[AppConstants.catOnlineChallenge]?.isFullyActive ?? false;
-      _wifiActive =
-          statuses[AppConstants.catWifiChallenge]?.isFullyActive ?? false;
+      _onlineActive = AppConstants.tempUnlockWifiAndOnlineChallenge ||
+          (statuses[AppConstants.catOnlineChallenge]?.isFullyActive ?? false);
+      _wifiActive = AppConstants.tempUnlockWifiAndOnlineChallenge ||
+          (statuses[AppConstants.catWifiChallenge]?.isFullyActive ?? false);
       _targetScore = targetScore;
       _totalAttempts = attempts.length;
       _overallAccuracy = totalQ == 0 ? 0 : totalC / totalQ;
@@ -290,7 +290,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             context,
                             MaterialPageRoute(
                                 builder: (_) => const CalculatorScreen())),
-                        onLeaderboard: () => _standardActive
+                        onLeaderboard: () => (_standardActive || AppConstants.tempUnlockLeaderboard)
                             ? Navigator.push(
                                 context,
                                 MaterialPageRoute(
@@ -904,7 +904,7 @@ class _ToolsRow extends StatelessWidget {
         _ToolChip(
             label: 'Leaderboard',
             icon: Icons.leaderboard_outlined,
-            isLocked: !standardActive,
+            isLocked: !(standardActive || AppConstants.tempUnlockLeaderboard),
             onTap: onLeaderboard),
       ]);
 }
@@ -993,9 +993,13 @@ class _HomeScoreCard extends StatelessWidget {
           Row(children: [
             Icon(Icons.insights_outlined, size: 16, color: scoreColor),
             const SizedBox(width: 8),
-            const Text('Score Prediction & Progress',
-                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
-            const Spacer(),
+            Expanded(
+              child: Text('Score Prediction & Progress',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+            ),
+            const SizedBox(width: 8),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
