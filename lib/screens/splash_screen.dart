@@ -56,13 +56,14 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // ACT logo mark — red background with white lettering
+              // ACT logo mark — your uploaded "S ACT" artwork
               Container(
-                width: 100,
-                height: 100,
+                width: 132,
+                height: 132,
+                padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
                   color: Colors.white,
-                  borderRadius: BorderRadius.circular(20),
+                  borderRadius: BorderRadius.circular(28),
                   boxShadow: [
                     BoxShadow(
                       color: Colors.black.withOpacity(0.25),
@@ -71,16 +72,9 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                     ),
                   ],
                 ),
-                child: Center(
-                  child: Text(
-                    'ACT',
-                    style: TextStyle(
-                      color: ActColors.primary,
-                      fontSize: 36,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 2,
-                    ),
-                  ),
+                child: Image.asset(
+                  'assets/images/app_icon.png',
+                  fit: BoxFit.contain,
                 ),
               ),
               const SizedBox(height: 24),

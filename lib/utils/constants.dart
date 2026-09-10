@@ -38,6 +38,18 @@ class AppConstants {
   static const int standardGraceDays = 15;
   static const int challengeGraceDays = 7;
 
+  // ── TEMPORARY testing override ───────────────────────
+  // While this is true, WiFi Challenge and Online Challenge are unlocked for
+  // everyone regardless of activation status, so they can be tested without
+  // needing an activation code yet. Standard activation is NOT affected.
+  // Set this back to `false` once testing is done to re-lock them.
+  static const bool tempUnlockWifiAndOnlineChallenge = true;
+
+  // Same idea, just for the Leaderboard screen — unlocked for testing
+  // regardless of Standard activation. Set back to `false` to re-lock it
+  // behind Standard activation once testing is done.
+  static const bool tempUnlockLeaderboard = true;
+
   // ── Store / Support ──────────────────────────────────
   static const String codeStoreUrl = "https://smartjamb.com/act-app/";
   static const String supportEmail = "smartjamb8505@gmail.com";

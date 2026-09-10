@@ -98,6 +98,17 @@ class AppTheme {
       ),
       iconTheme: IconThemeData(color: Colors.white),
     ),
+    // Every TabBar in this app lives inside a red (or dark-card) AppBar, so
+    // it must never fall back to Material 3's default label colors — those
+    // resolve to the primary/onSurfaceVariant colors, which in light mode
+    // are red-on-red and unreadable. Force explicit white labels here once,
+    // for every screen, instead of patching each TabBar individually.
+    tabBarTheme: const TabBarThemeData(
+      labelColor: Colors.white,
+      unselectedLabelColor: Colors.white70,
+      indicatorColor: Colors.white,
+      dividerColor: Colors.transparent,
+    ),
     elevatedButtonTheme: ElevatedButtonThemeData(
       style: ElevatedButton.styleFrom(
         backgroundColor: ActColors.primary,
@@ -157,6 +168,12 @@ class AppTheme {
         letterSpacing: 0.3,
       ),
       iconTheme: const IconThemeData(color: Colors.white),
+    ),
+    tabBarTheme: const TabBarThemeData(
+      labelColor: Colors.white,
+      unselectedLabelColor: Colors.white70,
+      indicatorColor: Colors.white,
+      dividerColor: Colors.transparent,
     ),
     elevatedButtonTheme: ElevatedButtonThemeData(
       style: ElevatedButton.styleFrom(

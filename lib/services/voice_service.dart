@@ -19,6 +19,7 @@ class VoiceService {
   bool _sttReady = false;
   bool _isReading = false;
   bool _isListening = false;
+  String? _lastSttError;
 
   static const _prefKey    = 'sj_act_voice_enabled';
   static const _sttPrefKey = 'sj_act_stt_enabled';
@@ -44,7 +45,7 @@ class VoiceService {
       final granted = await Permission.microphone.isGranted;
       if (!granted) return;
       _sttReady = await _stt.initialize(
-        onError: (_) => _isListening = false,
+        onError: (e) { _isListening = false; _lastSttError = e.errorMsg; },
         onStatus: (s) { if (s == 'done' || s == 'notListening') _isListening = false; },
       );
     } catch (_) { _sttReady = false; }
@@ -85,6 +86,13 @@ class VoiceService {
   // ── TTS ───────────────────────────────────────────────────────────────────
   Future<void> readQuestion({required String questionText, required List<String> options}) async {
     if (!_ttsReady) return;
+    // Always cut off whatever is currently being (or queued to be) spoken
+    // first. flutter_tts queues utterances by default, so without this a
+    // question read while a previous question/answer is still talking would
+    // just get queued up behind it instead of starting immediately — this is
+    // what made it seem like the voice "didn't detect" that a new question
+    // had loaded.
+    await _stopAndSettle();
     _isReading = true;
     final letters = ['A', 'B', 'C', 'D'];
     final buffer = StringBuffer();
@@ -97,7 +105,23 @@ class VoiceService {
 
   Future<void> readText(String text) async {
     if (!_ttsReady) return;
+    // Same reasoning as above: stop anything still playing (e.g. the
+    // question being read) before speaking the correct/incorrect feedback,
+    // so the feedback is always heard immediately instead of after a delay.
+    await _stopAndSettle();
     await _tts.speak(text);
+  }
+
+  /// Stops any in-progress speech and gives the native TTS engine a brief
+  /// moment to actually finish cancelling before the next speak() call goes
+  /// out. Without this pause, flutter_tts's stop() future can resolve
+  /// slightly before the native (especially Android) engine has really
+  /// stopped, so an immediate speak() right after gets silently swallowed —
+  /// this is what caused every other question to go silent instead of every
+  /// question reading aloud.
+  Future<void> _stopAndSettle() async {
+    await _tts.stop();
+    await Future.delayed(const Duration(milliseconds: 80));
   }
 
   void stopReading() {
@@ -106,42 +130,68 @@ class VoiceService {
   }
 
   // ── STT ───────────────────────────────────────────────────────────────────
+  /// Listens for a spoken "A"/"B"/"C"/"D" answer.
+  ///
+  /// [onUnrecognised] receives a human-readable reason so the UI can tell the
+  /// user *why* it failed (permission blocked, no speech engine on the
+  /// device, nothing understood, etc.) instead of always showing the same
+  /// generic "couldn't detect an answer" message.
   Future<void> listenForAnswer({
     required void Function(String letter) onResult,
-    void Function()? onUnrecognised,
+    void Function(String reason)? onUnrecognised,
     Duration timeout = const Duration(seconds: 8),
   }) async {
     // STT not available on web (flutlab.io)
     if (kIsWeb) {
-      onUnrecognised?.call();
+      onUnrecognised?.call(sttUnavailableReason);
       return;
     }
     if (_isListening) return;
 
-    // Request mic permission
+    // Request mic permission (this also correctly re-prompts the very first
+    // time, even if _initStt() skipped initialisation earlier because
+    // permission wasn't granted yet at app start).
     final status = await Permission.microphone.request();
+    if (status == PermissionStatus.permanentlyDenied) {
+      onUnrecognised?.call(
+        'Microphone permission is blocked for this app. Please enable it in '
+        'your device Settings → Apps → SJ ACT → Permissions → Microphone.',
+      );
+      return;
+    }
     if (status != PermissionStatus.granted) {
-      onUnrecognised?.call();
+      onUnrecognised?.call('Microphone permission is required to answer by voice.');
       return;
     }
 
-    // Initialise if needed
+    // Initialise (or re-initialise) the recognizer now that we know we have
+    // permission. onError always writes into _lastSttError so any failure —
+    // whether during this initialize() call or during the listen() session
+    // right after — is available to explain a failed attempt.
+    _lastSttError = null;
     if (!_sttReady) {
       _sttReady = await _stt.initialize(
-        onError: (_) => _isListening = false,
+        onError: (e) { _isListening = false; _lastSttError = e.errorMsg; },
         onStatus: (s) { if (s == 'done' || s == 'notListening') _isListening = false; },
       );
     }
-    if (!_sttReady) { onUnrecognised?.call(); return; }
+    if (!_sttReady) {
+      onUnrecognised?.call(
+        'Speech recognition is not available on this device'
+        '${_lastSttError != null ? ' ($_lastSttError)' : ''}. '
+        'Make sure a speech-recognition service (e.g. Google app) is installed and up to date.',
+      );
+      return;
+    }
 
     _isListening = true;
 
     // Set a hard timeout in case the STT callback never fires
-    Timer(timeout + const Duration(seconds: 2), () {
+    final hardTimeout = Timer(timeout + const Duration(seconds: 2), () {
       if (_isListening) {
         _isListening = false;
         _stt.stop();
-        onUnrecognised?.call();
+        onUnrecognised?.call(_lastSttError ?? 'Didn\'t catch that — no speech was detected. Try again.');
       }
     });
 
@@ -151,13 +201,16 @@ class VoiceService {
         onResult: (result) {
           if (!result.finalResult || resultFired) return;
           resultFired = true;
+          hardTimeout.cancel();
           _isListening = false;
           final spoken = result.recognizedWords.toLowerCase().trim();
           final detected = _detectOptionFromSpeech(spoken);
           if (detected != null) {
             onResult(detected);
+          } else if (spoken.isEmpty) {
+            onUnrecognised?.call('Didn\'t catch that — no speech was detected. Try again.');
           } else {
-            onUnrecognised?.call();
+            onUnrecognised?.call('Heard "$spoken" — please say just "A", "B", "C", or "D".');
           }
         },
         listenFor: timeout,
@@ -165,10 +218,16 @@ class VoiceService {
         localeId: 'en_US',
         cancelOnError: true,
         listenMode: stt.ListenMode.confirmation,
+        // Prefer the device's on-device/offline recognizer so answering by
+        // voice keeps working without an internet connection. On devices
+        // where on-device recognition isn't available, the platform
+        // transparently falls back to the online recognizer.
+        onDevice: true,
       );
     } catch (e) {
+      hardTimeout.cancel();
       _isListening = false;
-      onUnrecognised?.call();
+      onUnrecognised?.call('Voice recognition failed to start. Please try again.');
     }
   }
 

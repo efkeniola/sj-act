@@ -41,4 +41,50 @@ class UserProfileService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_displayNameKey, name.trim());
   }
+
+  // ── Online Challenge bet consequence: access pause ────────────────────────
+  // When a player loses an "access paused" bet in the Online Challenge, entry
+  // to Online Challenge is blocked until this timestamp.
+  static const _onlineBetPauseKey = 'sj_act_online_bet_pause_until';
+
+  static Future<DateTime?> getOnlineAccessPauseUntil() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ms = prefs.getInt(_onlineBetPauseKey);
+    if (ms == null) return null;
+    final until = DateTime.fromMillisecondsSinceEpoch(ms);
+    return until.isAfter(DateTime.now()) ? until : null;
+  }
+
+  static Future<void> setOnlineAccessPauseUntil(DateTime until) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_onlineBetPauseKey, until.millisecondsSinceEpoch);
+  }
+
+  static Future<void> clearOnlineAccessPause() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_onlineBetPauseKey);
+  }
+
+  // ── WiFi Challenge bet consequence: access pause ───────────────────────────
+  // Kept separate from the Online Challenge pause above so losing a bet in
+  // one mode never blocks the other.
+  static const _wifiBetPauseKey = 'sj_act_wifi_bet_pause_until';
+
+  static Future<DateTime?> getWifiAccessPauseUntil() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ms = prefs.getInt(_wifiBetPauseKey);
+    if (ms == null) return null;
+    final until = DateTime.fromMillisecondsSinceEpoch(ms);
+    return until.isAfter(DateTime.now()) ? until : null;
+  }
+
+  static Future<void> setWifiAccessPauseUntil(DateTime until) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_wifiBetPauseKey, until.millisecondsSinceEpoch);
+  }
+
+  static Future<void> clearWifiAccessPause() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_wifiBetPauseKey);
+  }
 }

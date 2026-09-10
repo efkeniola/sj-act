@@ -13,6 +13,11 @@ import '../services/user_profile_service.dart';
 import '../services/voice_service.dart';
 import '../utils/constants.dart';
 import '../utils/theme.dart';
+import '../widgets/mini_calculator.dart';
+
+String _formatOnlineTimerLabel(int seconds) =>
+    seconds < 60 ? '${seconds}s' : (seconds % 60 == 0 ? '${seconds ~/ 60}m' : '${seconds ~/ 60}m ${seconds % 60}s');
+
 
 // ── Setup screen ──────────────────────────────────────────────────────────────
 class OnlineChallengeScreen extends StatefulWidget {
@@ -25,38 +30,119 @@ class OnlineChallengeScreen extends StatefulWidget {
 class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
   OnlineChallengeRegion _region = OnlineChallengeRegion.usa;
   ActSection _section = ActSection.math;
+  bool _randomMixSubject = false;
   int _questionCount = 30;
+  // null = no per-question timer (unlimited thinking time). Host can set
+  // anywhere from 15s up to a 3-minute (180s) cap — English/Reading passages
+  // need more room than a quick Math question.
+  int? _questionTimerSeconds = 60;
+  bool get _noTimer => _questionTimerSeconds == null;
 
   bool _searching = false;
   String _statusMsg = '';
   String? _opponentName;
+  bool _joinedExistingRoom = false; // true when user joined someone else's room (roles reversed)
   ChallengeBetProposal? _pendingBet;
+  String _betProposedBy = 'opponent'; // 'opponent' or 'me'
   bool _betAccepted = false;
   bool _betDeclined = false;
   StreamSubscription<String>? _matchSub;
 
+  // Host auto-start (2 minutes) once matched
+  Timer? _hostStartTimer;
+  int _hostStartSecondsLeft = 120;
+
   final List<Map<String, dynamic>> _chatMessages = [];
   final _chatCtrl = TextEditingController();
   final _chatScrollCtrl = ScrollController();
-  bool _fakeOpponentReplied = false;
+  bool _opponentTyping = false;
+
+  // Bet consequence: block starting a new search while paused
+  DateTime? _accessPauseUntil;
+
+  // Real-internet monitoring for the matched lobby (chat/bet/ready) phase —
+  // the match screen already checks this continuously once gameplay
+  // starts; this covers the gap before that, since chatting and agreeing to
+  // a bet is just as much "online" activity as answering questions is.
+  Timer? _netMonitorTimer;
+  bool _netOk = true;
+
+  void _startNetMonitor() {
+    _netMonitorTimer?.cancel();
+    _netOk = true;
+    // Lobby chat/bet negotiation checks much more often than a live
+    // question does (every 2s here vs every 8s mid-match) and never runs a
+    // countdown-then-forfeit on your own end — nothing's at stake yet, so
+    // there's nothing for the app itself to force-end. But a real opponent
+    // isn't obligated to sit there either: the auto-start countdown above
+    // keeps ticking the whole time you're disconnected, and the longer the
+    // outage drags on, the more likely they just give up on you and leave,
+    // same as the "rare human behaviour" leave-chance already built into
+    // that timer — just weighted much higher while you're unreachable.
+    final rng = Random();
+    int lostStreak = 0;
+    _netMonitorTimer = Timer.periodic(const Duration(seconds: 2), (t) async {
+      if (!mounted || _opponentName == null) { t.cancel(); return; }
+      final ok = await FakeOnlineChallenge.hasRealInternet(timeout: const Duration(seconds: 4));
+      if (!mounted) return;
+      if (!ok) {
+        lostStreak++;
+        if (!_netOk) {
+          // already showing the banner — nothing new to render
+        } else {
+          setState(() => _netOk = false);
+        }
+        // First ~6s (3 checks) is given as normal WiFi flakiness. After
+        // that, escalating odds per check that they lose patience.
+        if (lostStreak > 3) {
+          final leaveChance = (0.12 + (lostStreak - 3) * 0.08).clamp(0.0, 0.7);
+          if (rng.nextDouble() < leaveChance) {
+            t.cancel();
+            _removeOpponentAndResearch(disconnected: true);
+            return;
+          }
+        }
+      } else {
+        if (_netOk == false) setState(() => _netOk = true);
+        lostStreak = 0;
+      }
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _checkAccessPause();
+  }
+
+  Future<void> _checkAccessPause() async {
+    final until = await UserProfileService.getOnlineAccessPauseUntil();
+    if (mounted) setState(() => _accessPauseUntil = until);
+  }
 
   @override
   void dispose() {
     _matchSub?.cancel();
+    _hostStartTimer?.cancel();
+    _netMonitorTimer?.cancel();
     _chatCtrl.dispose();
     _chatScrollCtrl.dispose();
     super.dispose();
   }
 
+  bool get _setupLocked => _searching || _opponentName != null;
+
   void _startSearch() {
+    if (_accessPauseUntil != null && _accessPauseUntil!.isAfter(DateTime.now())) return;
     setState(() {
       _searching = true;
       _statusMsg = 'Connecting...';
       _opponentName = null;
+      _joinedExistingRoom = false;
       _pendingBet = null;
       _betAccepted = false;
       _betDeclined = false;
-      _fakeOpponentReplied = false;
+      _opponentTyping = false;
       _chatMessages.clear();
     });
     _matchSub?.cancel();
@@ -79,22 +165,60 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
     }
     if (status.startsWith('joined:')) {
       final name = status.substring(7);
-      final bet = FakeOnlineChallenge.fakeOpponentBetProposal();
       setState(() {
         _opponentName = name;
         _searching = false;
         _statusMsg = '';
-        _pendingBet = bet;
+        _joinedExistingRoom = false; // this screen is always "host" flow
       });
       _addChat(name, FakeOnlineChallenge.opponentOpeningMessage(name));
-      if (bet != null) {
-        Future.delayed(const Duration(seconds: 2), () {
-          if (mounted) _addChat(name, 'Bet proposal: ${bet.description}');
-        });
-      }
+      _startHostStartTimer();
+      _startNetMonitor();
       return;
     }
     setState(() => _statusMsg = status);
+  }
+
+  // ── Host 2-minute auto-start ────────────────────────────────────────────
+  // Once an opponent is found, the host has 2 minutes to hit "Start
+  // Challenge". If they don't, the match proceeds automatically — just like
+  // a real opponent wouldn't wait around forever.
+  void _startHostStartTimer() {
+    _hostStartTimer?.cancel();
+    _hostStartSecondsLeft = 120;
+    _hostStartTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted || _opponentName == null) { t.cancel(); return; }
+      setState(() => _hostStartSecondsLeft--);
+      if (_hostStartSecondsLeft <= 0) {
+        t.cancel();
+        _startMatch();
+      }
+    });
+  }
+
+  /// Host removes the currently matched opponent (not satisfied / opponent
+  /// delaying, or gave up during a connection outage) and goes back to
+  /// searching.
+  void _removeOpponentAndResearch({bool disconnected = false}) {
+    _hostStartTimer?.cancel();
+    _netMonitorTimer?.cancel();
+    final name = _opponentName;
+    setState(() {
+      _opponentName = null;
+      _pendingBet = null;
+      _betAccepted = false;
+      _betDeclined = false;
+      _chatMessages.clear();
+      _netOk = true;
+    });
+    if (name != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(disconnected
+            ? '$name left — your connection dropped for too long.'
+            : 'Removed $name from the match. Searching again...')),
+      );
+    }
+    _startSearch();
   }
 
   void _addChat(String sender, String text) {
@@ -113,54 +237,176 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
     if (text.isEmpty) return;
     _addChat('You', text);
     _chatCtrl.clear();
+    _maybeOpponentReply();
+  }
 
-    // Opponent replies once with a realistic message
-    if (!_fakeOpponentReplied && _opponentName != null) {
-      _fakeOpponentReplied = true;
-      final replies = [
-        'Ha! Good luck to you too.',
-        'Ready.',
-        "Let's see.",
-        'Same! Let\'s go.',
-        'May the best student win.',
-        'Ready when you are.',
-        'GG incoming.',
-      ];
-      final delay = Duration(seconds: 2 + Random().nextInt(4));
-      Future.delayed(delay, () {
-        if (mounted && _opponentName != null) {
-          _addChat(_opponentName!, replies[Random().nextInt(replies.length)]);
-        }
+  /// Simulates a human opponent replying to chat: most of the time they
+  /// reply after a realistic "typing" delay drawn from a large phrase bank,
+  /// but sometimes — just like a real person — they don't reply at all.
+  void _maybeOpponentReply() {
+    if (_opponentName == null) return;
+    final rng = Random();
+    // ~22% chance the opponent just doesn't respond to this particular message.
+    if (rng.nextDouble() < 0.22) return;
+
+    final typingDelay = Duration(milliseconds: 500 + rng.nextInt(900));
+    Future.delayed(typingDelay, () {
+      if (!mounted || _opponentName == null) return;
+      setState(() => _opponentTyping = true);
+      final replyDelay = Duration(seconds: 2 + rng.nextInt(5));
+      Future.delayed(replyDelay, () {
+        if (!mounted || _opponentName == null) return;
+        setState(() => _opponentTyping = false);
+        _addChat(_opponentName!, FakeOnlineChallenge.randomChatReply());
       });
+    });
+  }
+
+  // ── Betting (host flow: the host decides whether to bring in a bet) ───────
+  void _hostProposeRandomBet() {
+    final bet = FakeOnlineChallenge.fakeOpponentBetProposal(guaranteed: true);
+    if (bet == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No bet generated — try again.')),
+      );
+      return;
     }
+    setState(() { _pendingBet = bet; _betProposedBy = 'me'; _betAccepted = false; _betDeclined = false; });
+    _addChat('You', 'Bet proposal: ${bet.description}');
+    _simulateOpponentBetResponse(bet);
+  }
+
+  // A bet decision isn't instant for a real person — they read it, think it
+  // over, then type a reply. This shows the same "typing..." indicator used
+  // for regular chat while that thinking happens, so accept/decline/counter
+  // never just pop in silently.
+  void _showOpponentThinkingThenReply(VoidCallback onReply) {
+    final rng = Random();
+    final thinkDelay = Duration(seconds: 1 + rng.nextInt(3));
+    Future.delayed(thinkDelay, () {
+      if (!mounted || _opponentName == null) return;
+      setState(() => _opponentTyping = true);
+      final typeDelay = Duration(milliseconds: 700 + rng.nextInt(1800));
+      Future.delayed(typeDelay, () {
+        if (!mounted) return;
+        setState(() => _opponentTyping = false);
+        onReply();
+      });
+    });
+  }
+
+  void _simulateOpponentBetResponse(ChallengeBetProposal bet) {
+    final rng = Random();
+    _showOpponentThinkingThenReply(() {
+      if (_opponentName == null || _pendingBet != bet) return;
+      final roll = rng.nextDouble();
+      if (roll < 0.55) {
+        // Accepts
+        setState(() => _betAccepted = true);
+        _addChat(_opponentName!, 'Deal. Let\'s go.');
+      } else if (roll < 0.80) {
+        // Counter-proposes a different bet
+        final counter = FakeOnlineChallenge.fakeOpponentBetProposal();
+        if (counter != null) {
+          setState(() { _pendingBet = counter; _betProposedBy = 'opponent'; });
+          _addChat(_opponentName!, 'Counter: ${counter.description}');
+        } else {
+          setState(() { _pendingBet = null; _betDeclined = true; });
+          _addChat(_opponentName!, 'Let\'s just play clean, no bet.');
+        }
+      } else {
+        // Declines outright
+        setState(() { _pendingBet = null; _betDeclined = true; });
+        _addChat(_opponentName!, 'Nah, I\'ll pass on that one.');
+      }
+    });
   }
 
   void _acceptBet() {
     setState(() => _betAccepted = true);
     _addChat('You', 'Bet accepted.');
-    Future.delayed(const Duration(seconds: 1), () {
-      if (mounted && _opponentName != null) _addChat(_opponentName!, 'Let\'s go then!');
+    _showOpponentThinkingThenReply(() {
+      if (_opponentName != null) _addChat(_opponentName!, 'Let\'s go then!');
     });
   }
 
   void _declineBet() {
     setState(() { _pendingBet = null; _betDeclined = true; });
     _addChat('You', 'Bet declined — playing clean.');
-    Future.delayed(const Duration(seconds: 1), () {
-      if (mounted && _opponentName != null) _addChat(_opponentName!, 'No problem. Good luck anyway.');
+    final rng = Random();
+    _showOpponentThinkingThenReply(() {
+      if (_opponentName == null) return;
+      final roll = rng.nextDouble();
+      if (roll < 0.15) {
+        // Rarely, the opponent gets annoyed and leaves entirely.
+        final name = _opponentName!;
+        _hostStartTimer?.cancel();
+        setState(() { _opponentName = null; _pendingBet = null; _betDeclined = false; });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$name left the room. Searching for a new opponent...')),
+        );
+        _startSearch();
+      } else if (roll < 0.40) {
+        // Sometimes they try a different bet instead.
+        final counter = FakeOnlineChallenge.fakeOpponentBetProposal();
+        if (counter != null) {
+          setState(() { _pendingBet = counter; _betProposedBy = 'opponent'; _betDeclined = false; });
+          _addChat(_opponentName!, 'Fair. How about this instead: ${counter.description}');
+        } else {
+          _addChat(_opponentName!, 'No problem. Good luck anyway.');
+        }
+      } else {
+        _addChat(_opponentName!, 'No problem. Good luck anyway.');
+      }
     });
   }
 
   void _startMatch() {
     if (_opponentName == null) return;
+    _hostStartTimer?.cancel();
+    _netMonitorTimer?.cancel();
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
         builder: (_) => OnlineChallengeMatchScreen(
           section: _section,
+          randomMixSubject: _randomMixSubject,
           questionCount: _questionCount,
+          questionTimeLimitSeconds: _questionTimerSeconds,
           opponentName: _opponentName!,
           bet: _betAccepted ? _pendingBet : null,
+          opponentStartsFirst: _joinedExistingRoom,
+        ),
+      ),
+    );
+  }
+
+  void _openActiveRooms() async {
+    final joined = await Navigator.push<Map<String, dynamic>>(
+      context,
+      MaterialPageRoute(builder: (_) => const _ActiveRoomsScreen()),
+    );
+    if (joined == null || !mounted) return;
+    // Joining someone else's room takes you to that host's lobby first —
+    // same as hosting yourself, just from the other side. The host decides
+    // whether to bring a bet, and can back out or remove you, before the
+    // match actually begins.
+    final started = await Navigator.push<Map<String, dynamic>>(
+      context,
+      MaterialPageRoute(builder: (_) => _JoinRoomLobbyScreen(room: joined)),
+    );
+    if (started == null || !mounted) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => OnlineChallengeMatchScreen(
+          section: joined['section'] as ActSection,
+          randomMixSubject: joined['randomMix'] as bool? ?? false,
+          questionCount: joined['questionCount'] as int,
+          questionTimeLimitSeconds: joined['timerSeconds'] as int?,
+          opponentName: joined['name'] as String,
+          bet: started['bet'] as ChallengeBetProposal?,
+          opponentStartsFirst: true,
         ),
       ),
     );
@@ -169,6 +415,7 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final paused = _accessPauseUntil != null && _accessPauseUntil!.isAfter(DateTime.now());
     return Scaffold(
       appBar: AppBar(title: const Text('Online Challenge')),
       body: SingleChildScrollView(
@@ -178,38 +425,137 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
           children: [
             // Activity status
             _ActivityBanner(isDark: isDark),
+            const SizedBox(height: 12),
+
+            // Browse active rooms
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: _setupLocked ? null : _openActiveRooms,
+                icon: const Icon(Icons.groups_outlined, size: 18),
+                label: const Text('Browse Active Rooms', style: TextStyle(fontWeight: FontWeight.w700)),
+                style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 13)),
+              ),
+            ),
             const SizedBox(height: 16),
+
+            if (paused) ...[
+              _ErrorBanner(msg: 'Online Challenge access is paused until ${_accessPauseUntil!.hour.toString().padLeft(2, '0')}:${_accessPauseUntil!.minute.toString().padLeft(2, '0')} (bet outcome).'),
+              const SizedBox(height: 16),
+            ],
 
             // Room selector
             _Label('Select Room'),
-            Row(children: [
-              _RoomCard(title: 'USA Room', subtitle: 'US-based opponents', code: 'US',
-                  isSelected: _region == OnlineChallengeRegion.usa,
-                  onTap: () => setState(() => _region = OnlineChallengeRegion.usa), isDark: isDark),
-              const SizedBox(width: 12),
-              _RoomCard(title: 'Foreign Room', subtitle: 'International opponents', code: 'GL',
-                  isSelected: _region == OnlineChallengeRegion.foreign,
-                  onTap: () => setState(() => _region = OnlineChallengeRegion.foreign), isDark: isDark),
-            ]),
+            IgnorePointer(
+              ignoring: _setupLocked,
+              child: Opacity(
+                opacity: _setupLocked ? 0.5 : 1,
+                child: Row(children: [
+                  _RoomCard(title: 'USA Room', subtitle: 'US-based opponents', code: 'US',
+                      isSelected: _region == OnlineChallengeRegion.usa,
+                      onTap: () => setState(() => _region = OnlineChallengeRegion.usa), isDark: isDark),
+                  const SizedBox(width: 12),
+                  _RoomCard(title: 'Foreign Room', subtitle: 'International opponents', code: 'GL',
+                      isSelected: _region == OnlineChallengeRegion.foreign,
+                      onTap: () => setState(() => _region = OnlineChallengeRegion.foreign), isDark: isDark),
+                ]),
+              ),
+            ),
             const SizedBox(height: 16),
 
             // Section
             _Label('ACT Section'),
-            DropdownButtonFormField<ActSection>(
-              value: _section,
-              decoration: InputDecoration(border: OutlineInputBorder(borderRadius: BorderRadius.circular(8))),
-              items: ActSection.values.map((s) => DropdownMenuItem(value: s, child: Text(actSectionDisplayName(s)))).toList(),
-              onChanged: (s) { if (s != null) setState(() => _section = s); },
+            IgnorePointer(
+              ignoring: _setupLocked,
+              child: Opacity(
+                opacity: _setupLocked ? 0.5 : 1,
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  DropdownButtonFormField<ActSection>(
+                    value: _section,
+                    decoration: InputDecoration(border: OutlineInputBorder(borderRadius: BorderRadius.circular(8))),
+                    items: ActSection.values.map((s) => DropdownMenuItem(value: s, child: Text(actSectionDisplayName(s)))).toList(),
+                    onChanged: _randomMixSubject ? null : (s) { if (s != null) setState(() => _section = s); },
+                  ),
+                  const SizedBox(height: 8),
+                  CheckboxListTile(
+                    value: _randomMixSubject,
+                    onChanged: (v) => setState(() => _randomMixSubject = v ?? false),
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    dense: true,
+                    title: const Text('Random Mix (all subjects)', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                    subtitle: const Text('Pull questions from every subject instead of one', style: TextStyle(fontSize: 11)),
+                  ),
+                ]),
+              ),
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 6),
             _Label('Questions'),
-            Wrap(spacing: 8, children: [10, 20, 30, 40].map((n) => ChoiceChip(
-              label: Text('$n'),
-              selected: _questionCount == n,
-              selectedColor: ActColors.primary,
-              labelStyle: TextStyle(color: _questionCount == n ? Colors.white : null, fontWeight: FontWeight.w600),
-              onSelected: (_) => setState(() => _questionCount = n),
-            )).toList()),
+            IgnorePointer(
+              ignoring: _setupLocked,
+              child: Opacity(
+                opacity: _setupLocked ? 0.5 : 1,
+                child: Wrap(spacing: 8, children: [10, 20, 30, 40].map((n) => ChoiceChip(
+                  label: Text('$n'),
+                  selected: _questionCount == n,
+                  selectedColor: ActColors.primary,
+                  labelStyle: TextStyle(color: _questionCount == n ? Colors.white : null, fontWeight: FontWeight.w600),
+                  onSelected: (_) => setState(() => _questionCount = n),
+                )).toList()),
+              ),
+            ),
+            const SizedBox(height: 6),
+            _Label('Time per Question (host sets this)'),
+            IgnorePointer(
+              ignoring: _setupLocked,
+              child: Opacity(
+                opacity: _setupLocked ? 0.5 : 1,
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  SwitchListTile(
+                    value: !_noTimer,
+                    onChanged: (v) => setState(() => _questionTimerSeconds = v ? (_questionTimerSeconds ?? 60) : null),
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    title: const Text('Use a per-question timer', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                  ),
+                  if (!_noTimer) ...[
+                    Row(children: [
+                      Expanded(
+                        child: Slider(
+                          value: _questionTimerSeconds!.toDouble(),
+                          min: 15,
+                          max: 180, // 3 minutes — English/Reading passages need the room
+                          divisions: 11, // 15s steps
+                          activeColor: ActColors.primary,
+                          label: _formatOnlineTimerLabel(_questionTimerSeconds!),
+                          onChanged: (v) => setState(() => _questionTimerSeconds = v.round()),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 52,
+                        child: Text(_formatOnlineTimerLabel(_questionTimerSeconds!),
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: ActColors.primary)),
+                      ),
+                    ]),
+                    Wrap(spacing: 8, children: [30, 60, 90, 120, 180].map((n) => ChoiceChip(
+                      label: Text(_formatOnlineTimerLabel(n)),
+                      selected: _questionTimerSeconds == n,
+                      selectedColor: ActColors.primary,
+                      labelStyle: TextStyle(color: _questionTimerSeconds == n ? Colors.white : null, fontWeight: FontWeight.w600, fontSize: 12),
+                      onSelected: (_) => setState(() => _questionTimerSeconds = n),
+                    )).toList()),
+                  ],
+                ]),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              _questionTimerSeconds == null
+                  ? 'No time limit — you and your opponent can take as long as you want on each question.'
+                  : 'Whoever hasn\'t answered when the clock hits 0 is skipped and the match moves on immediately.',
+              style: TextStyle(fontSize: 10.5, color: ActColors.midGray),
+            ),
             const SizedBox(height: 24),
 
             // Match state
@@ -231,21 +577,57 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
                     ),
                     icon: const Icon(Icons.public),
                     label: const Text('Find Opponent', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
-                    onPressed: _startSearch,
+                    onPressed: paused ? null : _startSearch,
                   ),
                 ),
               ],
             ] else ...[
               // Opponent card
+              if (!_netOk) ...[
+                _ErrorBanner(msg: 'No internet connection. Everything here is paused until it comes back.'),
+                const SizedBox(height: 10),
+              ],
               _MatchedCard(
                 opponentName: _opponentName!,
                 pendingBet: (_pendingBet != null && !_betAccepted && !_betDeclined) ? _pendingBet : null,
+                proposedByMe: _betProposedBy == 'me',
                 activeBet: _betAccepted ? _pendingBet : null,
-                onAcceptBet: _acceptBet,
-                onDeclineBet: _declineBet,
+                onAcceptBet: _netOk ? _acceptBet : () {},
+                onDeclineBet: _netOk ? _declineBet : () {},
+                onRemoveOpponent: _removeOpponentAndResearch,
                 isDark: isDark,
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 10),
+
+              // Host auto-start countdown
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: ActColors.warning.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(children: [
+                  Icon(Icons.timer_outlined, size: 14, color: ActColors.warning),
+                  const SizedBox(width: 6),
+                  Expanded(child: Text(
+                    'Auto-starts in ${_hostStartSecondsLeft ~/ 60}:${(_hostStartSecondsLeft % 60).toString().padLeft(2, '0')} if you don\'t begin',
+                    style: TextStyle(fontSize: 11, color: ActColors.warning, fontWeight: FontWeight.w600),
+                  )),
+                ]),
+              ),
+              const SizedBox(height: 12),
+
+              // Host may propose a bet (only when they haven't already)
+              if (_pendingBet == null && !_betAccepted)
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _hostProposeRandomBet,
+                    icon: const Icon(Icons.casino_outlined, size: 16),
+                    label: const Text('Propose a Random Bet'),
+                  ),
+                ),
+              const SizedBox(height: 10),
 
               // Chat
               _Label('Pre-Match Chat'),
@@ -255,6 +637,8 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
                 scrollCtrl: _chatScrollCtrl,
                 onSend: _sendChat,
                 isDark: isDark,
+                opponentTyping: _opponentTyping,
+                opponentName: _opponentName!,
               ),
               const SizedBox(height: 20),
               SizedBox(
@@ -265,7 +649,7 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
                     padding: const EdgeInsets.symmetric(vertical: 15),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                   ),
-                  onPressed: _startMatch,
+                  onPressed: _netOk ? _startMatch : null,
                   child: const Text('Start Challenge', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
                 ),
               ),
@@ -278,21 +662,578 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
   }
 }
 
+// ── Active Rooms directory ─────────────────────────────────────────────────────
+// A browsable list of other "in-progress" rooms, simulated client-side (there
+// is no live backend here — see fake_online_challenge.dart). Rooms that are
+// actually joinable ("waiting for opponent") are sorted to the top; rooms
+// that are mid-match or waiting on a disconnected player are shown below,
+// for flavor, but can't be joined.
+enum _RoomState { waiting, playing, rejoinWait }
+
+class _RoomInfo {
+  final String name;
+  final ActSection section;
+  final bool randomMix;
+  final int questionCount;
+  final OnlineChallengeRegion region;
+  final int? timerSeconds; // null = no per-question timer in this room
+  _RoomState state;
+  _RoomInfo({
+    required this.name,
+    required this.section,
+    required this.randomMix,
+    required this.questionCount,
+    required this.region,
+    required this.timerSeconds,
+    required this.state,
+  });
+}
+
+class _ActiveRoomsScreen extends StatefulWidget {
+  const _ActiveRoomsScreen();
+  @override
+  State<_ActiveRoomsScreen> createState() => _ActiveRoomsScreenState();
+}
+
+class _ActiveRoomsScreenState extends State<_ActiveRoomsScreen> {
+  final _rng = Random();
+  List<_RoomInfo> _rooms = [];
+  bool _joining = false;
+  // Room browsing is still "online" — it shouldn't show a list of rooms
+  // (fake or not) or let anyone tap Join if there's no real internet.
+  bool _checkingNet = true;
+  bool _netOk = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkNetThenLoad();
+  }
+
+  Future<void> _checkNetThenLoad() async {
+    final ok = await FakeOnlineChallenge.hasRealInternet(timeout: const Duration(seconds: 4));
+    if (!mounted) return;
+    setState(() {
+      _checkingNet = false;
+      _netOk = ok;
+      if (ok) _rooms = _generateRooms();
+    });
+  }
+
+  List<_RoomInfo> _generateRooms() {
+    final count = 8 + _rng.nextInt(8); // 8-15 rooms
+    final names = FakeOnlineChallenge.sampleRoomNames(count);
+    final states = [
+      ..._RoomState.values, // ensure at least one of each appears
+    ];
+    return List.generate(count, (i) {
+      final state = i < states.length
+          ? states[i]
+          : _RoomState.values[_rng.nextInt(_RoomState.values.length)];
+      return _RoomInfo(
+        name: names[i],
+        section: ActSection.values[_rng.nextInt(ActSection.values.length)],
+        randomMix: _rng.nextDouble() < 0.25,
+        questionCount: [10, 20, 30, 40][_rng.nextInt(4)],
+        region: _rng.nextBool() ? OnlineChallengeRegion.usa : OnlineChallengeRegion.foreign,
+        timerSeconds: [null, 30, 45, 60, 90, 120, 180][_rng.nextInt(7)],
+        state: state,
+      );
+    })..sort((a, b) {
+        int rank(_RoomState s) => s == _RoomState.waiting ? 0 : (s == _RoomState.playing ? 1 : 2);
+        return rank(a.state).compareTo(rank(b.state));
+      });
+  }
+
+  Future<void> _tryJoin(_RoomInfo room) async {
+    if (_joining || room.state != _RoomState.waiting) return;
+    // Re-check right before joining too — internet could have dropped
+    // while the person was just browsing the list.
+    final stillOk = await FakeOnlineChallenge.hasRealInternet(timeout: const Duration(seconds: 4));
+    if (!mounted) return;
+    if (!stillOk) {
+      setState(() => _netOk = false);
+      return;
+    }
+    setState(() => _joining = true);
+
+    // Simulate realistic network/matchmaking delay
+    await Future.delayed(Duration(milliseconds: 500 + _rng.nextInt(900)));
+    if (!mounted) return;
+
+    // Human behaviour: sometimes another player beats you to this room.
+    if (_rng.nextDouble() < 0.25) {
+      setState(() {
+        room.state = _RoomState.playing;
+        _rooms.sort((a, b) {
+          int rank(_RoomState s) => s == _RoomState.waiting ? 0 : (s == _RoomState.playing ? 1 : 2);
+          return rank(a.state).compareTo(rank(b.state));
+        });
+        _joining = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Someone else just joined ${room.name}\'s room. Try another.')),
+      );
+      return;
+    }
+
+    if (!mounted) return;
+    Navigator.pop(context, {
+      'name': room.name,
+      'section': room.section,
+      'randomMix': room.randomMix,
+      'questionCount': room.questionCount,
+      'timerSeconds': room.timerSeconds,
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Active Rooms')),
+      body: _checkingNet
+          ? const Center(child: CircularProgressIndicator())
+          : !_netOk
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(28),
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.wifi_off, size: 40, color: ActColors.danger),
+                      const SizedBox(height: 14),
+                      const Text('No internet connection detected',
+                          style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15), textAlign: TextAlign.center),
+                      const SizedBox(height: 6),
+                      Text('Online Challenge needs a real internet connection — rooms can\'t load without one.',
+                          textAlign: TextAlign.center, style: TextStyle(fontSize: 12.5, color: ActColors.midGray)),
+                      const SizedBox(height: 16),
+                      FilledButton(
+                        style: FilledButton.styleFrom(backgroundColor: ActColors.primary),
+                        onPressed: () => setState(() { _checkingNet = true; _checkNetThenLoad(); }),
+                        child: const Text('Try Again'),
+                      ),
+                    ]),
+                  ),
+                )
+              : ListView.separated(
+        padding: const EdgeInsets.all(16),
+        itemCount: _rooms.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 10),
+        itemBuilder: (_, i) {
+          final r = _rooms[i];
+          final joinable = r.state == _RoomState.waiting;
+          String stateLabel;
+          Color stateColor;
+          switch (r.state) {
+            case _RoomState.waiting:
+              stateLabel = 'Waiting for opponent';
+              stateColor = ActColors.success;
+              break;
+            case _RoomState.playing:
+              stateLabel = 'Match in progress';
+              stateColor = ActColors.info;
+              break;
+            case _RoomState.rejoinWait:
+              stateLabel = 'Waiting for player to rejoin';
+              stateColor = ActColors.warning;
+              break;
+          }
+          return Opacity(
+            opacity: joinable ? 1 : 0.55,
+            child: Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: isDark ? ActColors.darkCard : Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: stateColor.withOpacity(0.25)),
+              ),
+              child: Row(children: [
+                CircleAvatar(radius: 18, backgroundColor: ActColors.primary,
+                    child: Text(r.name.substring(0, 1).toUpperCase(),
+                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800))),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(r.name, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${r.randomMix ? "Random Mix" : actSectionDisplayName(r.section)} · ${r.questionCount}Q · ${r.region == OnlineChallengeRegion.usa ? "USA" : "Foreign"} · ${r.timerSeconds == null ? "No timer" : "${_formatOnlineTimerLabel(r.timerSeconds!)}/question"}',
+                      style: TextStyle(fontSize: 11, color: ActColors.midGray),
+                    ),
+                    const SizedBox(height: 4),
+                    Row(children: [
+                      Icon(Icons.circle, size: 8, color: stateColor),
+                      const SizedBox(width: 4),
+                      Text(stateLabel, style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w600, color: stateColor)),
+                    ]),
+                  ]),
+                ),
+                if (joinable)
+                  FilledButton(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: ActColors.primary,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    ),
+                    onPressed: _joining ? null : () => _tryJoin(r),
+                    child: const Text('Join', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                  ),
+              ]),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+// ── Join Room lobby ─────────────────────────────────────────────────────────
+// When you join someone else's room, you land here first — same idea as the
+// host's matched-card screen, just from the other side. The host (bot)
+// decides whether to bring a bet, can back out entirely, and controls when
+// the match actually begins (capped at 2 minutes, same as hosting).
+class _JoinRoomLobbyScreen extends StatefulWidget {
+  final Map<String, dynamic> room;
+  const _JoinRoomLobbyScreen({required this.room});
+  @override
+  State<_JoinRoomLobbyScreen> createState() => _JoinRoomLobbyScreenState();
+}
+
+class _JoinRoomLobbyScreenState extends State<_JoinRoomLobbyScreen> {
+  final List<Map<String, dynamic>> _chatMessages = [];
+  final _chatCtrl = TextEditingController();
+  final _chatScrollCtrl = ScrollController();
+  bool _opponentTyping = false;
+
+  ChallengeBetProposal? _pendingBet;
+  bool _betResolvedByHost = false; // host proposed & joiner responded (or no bet at all)
+  bool _betAccepted = false;
+
+  Timer? _startTimer;
+  int _secondsUntilStart = 0;
+  bool _removed = false; // host kicked the joiner
+
+  // Same real-internet monitoring as the host-side lobby — chatting and
+  // negotiating a bet here is just as much "online" activity as answering
+  // questions later is, so it shouldn't be exempt from the check either.
+  Timer? _netMonitorTimer;
+  bool _netOk = true;
+
+  String get _hostName => widget.room['name'] as String;
+
+  @override
+  void initState() {
+    super.initState();
+    final rng = Random();
+    _addChat(_hostName, FakeOnlineChallenge.opponentOpeningMessage(_hostName));
+    _startNetMonitor();
+
+    // Host decides whether to bring a bet into their room. This relies on
+    // fakeOpponentBetProposal()'s own probability (55-90% depending on
+    // activity) rather than an extra coin-flip here — two stacked "maybe
+    // not" checks were making bets show up far too rarely to ever notice.
+    Future.delayed(Duration(seconds: 2 + rng.nextInt(4)), () {
+      if (!mounted) return;
+      final bet = FakeOnlineChallenge.fakeOpponentBetProposal();
+      if (bet != null) {
+        setState(() => _pendingBet = bet);
+        _addChat(_hostName, 'Bet proposal: ${bet.description}');
+      } else {
+        setState(() => _betResolvedByHost = true);
+      }
+    });
+
+    // Host starts the match somewhere between 20s and 2 minutes from now —
+    // if they never actively start it, it proceeds automatically at the cap.
+    _secondsUntilStart = 20 + rng.nextInt(101); // 20–120s
+    _startTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) { t.cancel(); return; }
+      setState(() => _secondsUntilStart--);
+
+      // Rare human behaviour: host loses interest and removes you before
+      // the match even starts. This runs the same whether or not you're
+      // currently connected — a real host doesn't know or care why you've
+      // gone quiet, they just see no response and eventually give up (see
+      // _startNetMonitor below for the disconnect-specific version of this).
+      if (_secondsUntilStart > 5 && !_removed && rng.nextDouble() < 0.008) {
+        t.cancel();
+        _hostRemovesJoiner();
+        return;
+      }
+
+      if (_secondsUntilStart <= 0) {
+        t.cancel();
+        _resolveAndStart();
+      }
+    });
+  }
+
+  void _startNetMonitor() {
+    _netMonitorTimer?.cancel();
+    _netOk = true;
+    // Same 2s cadence as the host-side lobby, and the same idea: the
+    // auto-start countdown above keeps running the whole time (a real
+    // host doesn't pause their clock just because you went quiet), and
+    // the longer you stay disconnected, the more likely the host gives up
+    // and leaves before you ever reconnect — same escalating odds as the
+    // host lobby's version of this.
+    final rng = Random();
+    int lostStreak = 0;
+    _netMonitorTimer = Timer.periodic(const Duration(seconds: 2), (t) async {
+      if (!mounted || _removed) { t.cancel(); return; }
+      final ok = await FakeOnlineChallenge.hasRealInternet(timeout: const Duration(seconds: 4));
+      if (!mounted) return;
+      if (!ok) {
+        lostStreak++;
+        if (!_netOk) {
+          // already showing the banner
+        } else {
+          setState(() => _netOk = false);
+        }
+        if (lostStreak > 3) {
+          final leaveChance = (0.12 + (lostStreak - 3) * 0.08).clamp(0.0, 0.7);
+          if (rng.nextDouble() < leaveChance) {
+            t.cancel();
+            _hostRemovesJoiner(disconnected: true);
+            return;
+          }
+        }
+      } else {
+        if (_netOk == false) setState(() => _netOk = true);
+        lostStreak = 0;
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _startTimer?.cancel();
+    _netMonitorTimer?.cancel();
+    _chatCtrl.dispose();
+    _chatScrollCtrl.dispose();
+    super.dispose();
+  }
+
+  void _hostRemovesJoiner({bool disconnected = false}) {
+    if (!mounted || _removed) return;
+    _startTimer?.cancel();
+    _netMonitorTimer?.cancel();
+    setState(() => _removed = true);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(disconnected
+          ? '$_hostName left — your connection dropped for too long.'
+          : '$_hostName removed you from the room.')),
+    );
+    Future.delayed(const Duration(milliseconds: 900), () {
+      if (mounted) Navigator.pop(context); // back to Active Rooms, no match
+    });
+  }
+
+  void _addChat(String sender, String text) {
+    if (!mounted) return;
+    setState(() => _chatMessages.add({'sender': sender, 'text': text}));
+    Future.delayed(const Duration(milliseconds: 80), () {
+      if (_chatScrollCtrl.hasClients) {
+        _chatScrollCtrl.animateTo(_chatScrollCtrl.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+      }
+    });
+  }
+
+  void _sendChat() {
+    final text = _chatCtrl.text.trim();
+    if (text.isEmpty) return;
+    _addChat('You', text);
+    _chatCtrl.clear();
+    final rng = Random();
+    if (rng.nextDouble() < 0.22) return; // sometimes no reply at all
+    Future.delayed(Duration(milliseconds: 500 + rng.nextInt(900)), () {
+      if (!mounted) return;
+      setState(() => _opponentTyping = true);
+      Future.delayed(Duration(seconds: 2 + rng.nextInt(5)), () {
+        if (!mounted) return;
+        setState(() => _opponentTyping = false);
+        _addChat(_hostName, FakeOnlineChallenge.randomChatReply());
+      });
+    });
+  }
+
+  // Same "thinking, then typing" pause used for regular chat, applied to
+  // bet decisions too — a real host doesn't reply to Accept/Decline instantly.
+  void _showOpponentThinkingThenReply(VoidCallback onReply) {
+    final rng = Random();
+    Future.delayed(Duration(seconds: 1 + rng.nextInt(3)), () {
+      if (!mounted) return;
+      setState(() => _opponentTyping = true);
+      Future.delayed(Duration(milliseconds: 700 + rng.nextInt(1800)), () {
+        if (!mounted) return;
+        setState(() => _opponentTyping = false);
+        onReply();
+      });
+    });
+  }
+
+  void _acceptBet() {
+    setState(() { _betAccepted = true; _betResolvedByHost = true; });
+    _addChat('You', 'Bet accepted.');
+    _showOpponentThinkingThenReply(() => _addChat(_hostName, "Let's go then!"));
+  }
+
+  void _declineBet() {
+    setState(() { _pendingBet = null; _betResolvedByHost = true; });
+    _addChat('You', 'Bet declined — playing clean.');
+    final rng = Random();
+    _showOpponentThinkingThenReply(() {
+      final roll = rng.nextDouble();
+      if (roll < 0.12) {
+        _hostRemovesJoiner();
+      } else if (roll < 0.35) {
+        final counter = FakeOnlineChallenge.fakeOpponentBetProposal();
+        if (counter != null) {
+          setState(() { _pendingBet = counter; _betResolvedByHost = false; });
+          _addChat(_hostName, 'Fair. How about this instead: ${counter.description}');
+        } else {
+          _addChat(_hostName, 'No worries, good luck.');
+        }
+      } else {
+        _addChat(_hostName, 'No worries, good luck.');
+      }
+    });
+  }
+
+  void _resolveAndStart() {
+    if (!mounted || _removed) return;
+    // If a bet is still hanging when time's up, treat it as declined —
+    // real matches don't wait forever on a bet negotiation.
+    Navigator.pop(context, {'bet': _betAccepted ? _pendingBet : null});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final waitingOnBet = _pendingBet != null && !_betResolvedByHost;
+    return Scaffold(
+      appBar: AppBar(title: Text('$_hostName\'s Room')),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(children: [
+          if (!_netOk) ...[
+            _ErrorBanner(msg: 'No internet connection. Everything here is paused until it comes back.'),
+            const SizedBox(height: 12),
+          ],
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: ActColors.info.withOpacity(0.07),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: ActColors.info.withOpacity(0.22)),
+            ),
+            child: Column(children: [
+              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                _PlayerPill(name: 'You', isUser: true),
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Text('VS', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18, color: ActColors.primary))),
+                _PlayerPill(name: _hostName, isUser: false),
+              ]),
+              const SizedBox(height: 10),
+              Text(
+                '${(widget.room['randomMix'] as bool? ?? false) ? "Random Mix" : actSectionDisplayName(widget.room['section'] as ActSection)} · ${widget.room['questionCount']}Q · ${widget.room['timerSeconds'] == null ? "No timer" : "${_formatOnlineTimerLabel(widget.room['timerSeconds'] as int)}/question"}',
+                style: TextStyle(fontSize: 11.5, color: ActColors.midGray, fontWeight: FontWeight.w600),
+              ),
+            ]),
+          ),
+          const SizedBox(height: 16),
+
+          if (_pendingBet != null && !_betAccepted) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(color: ActColors.warning.withOpacity(0.10), borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: ActColors.warning.withOpacity(0.28))),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('$_hostName proposes a bet:', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12, color: ActColors.warning)),
+                const SizedBox(height: 5),
+                Text(_pendingBet!.description, style: const TextStyle(fontSize: 13, height: 1.4)),
+                const SizedBox(height: 10),
+                Row(children: [
+                  Expanded(child: OutlinedButton(
+                    style: OutlinedButton.styleFrom(foregroundColor: ActColors.danger, side: BorderSide(color: ActColors.danger.withOpacity(0.5))),
+                    onPressed: _netOk ? _declineBet : null, child: const Text('Decline'))),
+                  const SizedBox(width: 10),
+                  Expanded(child: FilledButton(style: FilledButton.styleFrom(backgroundColor: ActColors.warning),
+                      onPressed: _netOk ? _acceptBet : null, child: const Text('Accept', style: TextStyle(color: Colors.white)))),
+                ]),
+              ]),
+            ),
+            const SizedBox(height: 14),
+          ] else if (_betAccepted) ...[
+            Text('Active bet: ${_pendingBet?.description ?? ""}', style: TextStyle(fontSize: 11, color: ActColors.warning, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 14),
+          ],
+
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(color: ActColors.primary.withOpacity(0.08), borderRadius: BorderRadius.circular(8)),
+            child: Row(children: [
+              Icon(Icons.timer_outlined, size: 14, color: ActColors.primary),
+              const SizedBox(width: 6),
+              Expanded(child: Text(
+                waitingOnBet
+                    ? 'Waiting on the bet before $_hostName starts...'
+                    : '$_hostName starts the match in ${_secondsUntilStart}s (or sooner)',
+                style: TextStyle(fontSize: 11, color: ActColors.primary, fontWeight: FontWeight.w600),
+              )),
+            ]),
+          ),
+          const SizedBox(height: 14),
+
+          _Label('Pre-Match Chat'),
+          _ChatBox(
+            messages: _chatMessages,
+            controller: _chatCtrl,
+            scrollCtrl: _chatScrollCtrl,
+            onSend: _sendChat,
+            isDark: isDark,
+            opponentTyping: _opponentTyping,
+            opponentName: _hostName,
+          ),
+          const SizedBox(height: 20),
+          TextButton.icon(
+            onPressed: () => Navigator.pop(context),
+            icon: Icon(Icons.exit_to_app, size: 16, color: ActColors.danger),
+            label: Text('Leave Room', style: TextStyle(fontSize: 12, color: ActColors.danger)),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
 // ── Live match screen ─────────────────────────────────────────────────────────
 enum _MatchPhase { myTurn, opponentThinking, opponentAfk, finished }
 
 class OnlineChallengeMatchScreen extends StatefulWidget {
   final ActSection section;
+  final bool randomMixSubject;
   final int questionCount;
+  // null = no per-question timer (unlimited thinking time per question)
+  final int? questionTimeLimitSeconds;
   final String opponentName;
   final ChallengeBetProposal? bet;
+  // True when the user joined someone else's already-running room instead
+  // of hosting their own — in that case the opponent (host) is treated as
+  // already under way, the opposite of the normal "you set up, opponent
+  // joins you" flow.
+  final bool opponentStartsFirst;
 
   const OnlineChallengeMatchScreen({
     super.key,
     required this.section,
+    this.randomMixSubject = false,
     required this.questionCount,
+    this.questionTimeLimitSeconds,
     required this.opponentName,
     this.bet,
+    this.opponentStartsFirst = false,
   });
 
   @override
@@ -306,14 +1247,18 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
   String? _selected;
   bool _showFeedback = false;
   bool _finished = false;
+  bool _quitEarly = false;
+  bool _calcVisible = false;
 
   // Opponent state
   _MatchPhase _phase = _MatchPhase.opponentThinking;
   int _opponentAnswered = 0;
+  int _opponentCorrect = 0;
   int _opponentAfkSec = 0;
   bool _myTurnDone = false;
   bool _opponentDone = false;
   StreamSubscription<OpponentEvent>? _opponentSub;
+  late final int _opponentSessionId;
   String _opponentStatus = 'Thinking...';
 
   // Per-question timer (player's own)
@@ -335,10 +1280,27 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
   bool _voiceEnabled = false;
   final FocusNode _focusNode = FocusNode();
 
+  int get _myCorrectSoFar => _myAnswers.entries.where((e) {
+        final qi = e.key;
+        return qi < _questions.length && e.value == _questions[qi].correctAnswer;
+      }).length;
+
   @override
   void initState() {
     super.initState();
+    _opponentSessionId = FakeOnlineChallenge.startOpponentSession();
     _buildQuestions();
+    // When joining someone else's room, the host has already been playing.
+    // This used to also fake-seed _opponentAnswered/_opponentCorrect ahead
+    // by 1-2, which meant that counter stayed permanently 1-2 higher than
+    // your own current question for the rest of the match — e.g. showing
+    // "opponent: 4/20" while you're still on Q2. That's exactly the mismatch
+    // that made the numbers look broken/inconsistent, so it's gone now —
+    // only the flavor text stays, and the counters start in sync at zero
+    // like everything else.
+    if (widget.opponentStartsFirst) {
+      _opponentStatus = '${widget.opponentName} already started — catching up...';
+    }
     _startMatchTimer();
     _startConnectivityMonitor();
     _loadVoice();
@@ -347,10 +1309,10 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
   }
 
   void _buildQuestions() {
-    final pool = questionsForSection(widget.section);
+    final pool = widget.randomMixSubject ? questionsForRandomMix() : questionsForSection(widget.section);
     final shuffled = List.from(pool)..shuffle(Random());
     _questions = shuffled.take(widget.questionCount).cast<ActQuestion>().toList();
-    _matchSecondsLeft = _questions.length * 90;
+    _matchSecondsLeft = _questions.length * (widget.questionTimeLimitSeconds ?? 90);
   }
 
   Future<void> _loadVoice() async {
@@ -359,9 +1321,16 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
     if (mounted) setState(() => _voiceEnabled = enabled);
   }
 
+  void _toggleVoice() async {
+    final newVal = !_voiceEnabled;
+    await VoiceService.instance.setTtsEnabled(newVal);
+    if (!newVal) VoiceService.instance.stopReading();
+    if (mounted) setState(() => _voiceEnabled = newVal);
+  }
+
   void _startMatchTimer() {
     _matchTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted || _finished) return;
+      if (!mounted || _finished || _disconnectWarning) return; // frozen while offline
       setState(() => _matchSecondsLeft--);
       if (_matchSecondsLeft <= 0) _finishMatch();
     });
@@ -374,34 +1343,96 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
     _opponentDone = false;
     _roundAdvancing = false;
     _phase = _MatchPhase.myTurn;
-    _questionSecondsLeft = 90;
+    _questionSecondsLeft = widget.questionTimeLimitSeconds ?? 0;
 
-    // Start per-question timer
+    // Start per-question timer (only if the host configured one for this
+    // room). If it runs out, whichever side hasn't answered yet — me,
+    // the opponent, or both — is skipped immediately and the match moves
+    // straight on to the next question. No waiting, no manual button.
     _questionTimer?.cancel();
-    _questionTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted || _roundAdvancing) return;
-      setState(() => _questionSecondsLeft--);
-      if (_questionSecondsLeft <= 0) {
-        // Player timed out — auto-skip their answer and advance
-        _roundAdvancing = true;
-        _questionTimer?.cancel();
-        if (!_myTurnDone) {
-          _myAnswers[_qIndex] = ''; // skipped
-          _myTurnDone = true;
+    if (widget.questionTimeLimitSeconds != null) {
+      _questionTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (!mounted || _roundAdvancing || _disconnectWarning) return; // frozen while offline
+        setState(() => _questionSecondsLeft--);
+        if (_questionSecondsLeft <= 0) {
+          _forceAdvanceOnTimeout();
         }
-        _maybeAdvance();
-      }
-    });
+      });
+    } else {
+      // Host chose "No timer" — unlimited thinking time for the player, but
+      // the round still can't wait forever: if the opponent simulation ever
+      // stalls beyond a generous ceiling, this hard safety net force-skips
+      // whichever side hasn't answered so the match always keeps moving.
+      _questionSecondsLeft = _kNoTimerSafetyNetSeconds;
+      _questionTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (!mounted || _roundAdvancing || _disconnectWarning) return;
+        _questionSecondsLeft--;
+        if (_questionSecondsLeft <= 0) _forceAdvanceOnTimeout();
+      });
+    }
 
     // Start opponent for this question
     _startOpponentForQuestion(_qIndex);
   }
 
+  // Even with "No timer" selected, a round is never allowed to sit and wait
+  // forever — this is the outer ceiling that guarantees the match keeps
+  // moving no matter what.
+  static const int _kNoTimerSafetyNetSeconds = 150;
+
+  void _forceAdvanceOnTimeout() {
+    // NOTE: this used to set _roundAdvancing = true here before calling
+    // _maybeAdvance() below. That was the actual bug behind matches getting
+    // permanently stuck: _maybeAdvance()'s very first check is "if
+    // _roundAdvancing is already true, do nothing" — so setting it true
+    // right before calling _maybeAdvance() made it bail out immediately,
+    // every time, without ever scheduling the move to the next question.
+    // _roundAdvancing only ever gets reset in _nextQuestion(), which this
+    // was preventing from ever running — so the question (and everything
+    // after it) froze for good. _maybeAdvance() already sets _roundAdvancing
+    // itself right before it schedules _nextQuestion, so it doesn't need to
+    // be set here too.
+    _questionTimer?.cancel();
+    if (!_myTurnDone) {
+      _myAnswers[_qIndex] = ''; // skipped — time's up
+      _myTurnDone = true;
+    }
+    if (!_opponentDone) {
+      _opponentSub?.cancel();
+      _opponentDone = true;
+      // This used to just flip _opponentDone to true without ever counting
+      // the round for the opponent — meaning every time the clock forced a
+      // question through, the opponent's own "answered" tally silently fell
+      // one behind the question you were both actually on. Over a match
+      // with several timeouts that's exactly how you'd end up seeing e.g.
+      // "opponent: 3/20" while you're already on question 6 — their number
+      // gets stuck while yours keeps climbing. Counting it here (as a miss,
+      // most of the time — but see below) keeps both tallies matched to
+      // the question index at all times, the same way yours already is.
+      _opponentAnswered = (_opponentAnswered + 1).clamp(0, _questions.length);
+      final rng = Random();
+      // Real opponents don't always miss a deadline cleanly either —
+      // sometimes they were mid-answer and technically got it in right at
+      // the buzzer. Small chance of that instead of a flat miss every time.
+      final squeakedIn = rng.nextDouble() < 0.30;
+      if (squeakedIn && rng.nextDouble() < 0.55) {
+        _opponentCorrect = (_opponentCorrect + 1).clamp(0, _opponentAnswered);
+      }
+      if (mounted) {
+        setState(() => _opponentStatus = squeakedIn
+            ? '${widget.opponentName} just got it in at the last second'
+            : '${widget.opponentName} ran out of time');
+      }
+    }
+    _maybeAdvance();
+  }
+
   void _startOpponentForQuestion(int qIdx) {
     _opponentSub?.cancel();
-    final stream = FakeOnlineChallenge.opponentEventStream(
+    final stream = FakeOnlineChallenge.opponentAnswerForQuestion(
+      sessionId: _opponentSessionId,
+      qIndex: qIdx,
       totalQuestions: widget.questionCount,
-      userAccuracy: _myAnswers.isEmpty ? 0.70 : (_myAnswers.values.where((v) => v.isNotEmpty).length / _myAnswers.length),
     );
 
     _opponentSub = stream.listen((event) {
@@ -422,7 +1453,10 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
         _countAfk();
       } else if (event.isAnswered || event.isSkipped) {
         if (mounted) setState(() {
-          _opponentAnswered = (event.answeredSoFar ?? _opponentAnswered + 1).clamp(0, _questions.length);
+          // Each question is simulated fresh now, so we track progress
+          // ourselves rather than trusting a counter from the stream.
+          _opponentAnswered = (_opponentAnswered + 1).clamp(0, _questions.length);
+          if (event.isAnswered && event.isCorrect == true) _opponentCorrect++;
           _opponentDone = true;
           _opponentStatus = event.isSkipped
               ? '${widget.opponentName} skipped this one'
@@ -454,13 +1488,17 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
   }
 
   void _selectAnswer(String letter) {
-    if (_showFeedback || _phase != _MatchPhase.myTurn) return;
+    // Both players answer independently and simultaneously — selecting an
+    // answer is never blocked by what the opponent is doing. The only thing
+    // that locks your answer in is confirming it (or the timer running out).
+    // While offline, everything freezes so a disconnect never costs you time.
+    if (_showFeedback || _disconnectWarning) return;
     HapticFeedback.lightImpact();
     setState(() => _selected = letter);
   }
 
   void _confirmAnswer() {
-    if (_selected == null || _showFeedback) return;
+    if (_selected == null || _showFeedback || _disconnectWarning) return;
     HapticFeedback.mediumImpact();
     _myAnswers[_qIndex] = _selected!;
     _myTurnDone = true;
@@ -476,7 +1514,7 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
   }
 
   void _maybeAdvance() {
-    if (_roundAdvancing) return;
+    if (_roundAdvancing || _disconnectWarning) return; // don't advance mid-outage
     if (_myTurnDone && _opponentDone) {
       _roundAdvancing = true;
       Future.delayed(const Duration(milliseconds: 900), _nextQuestion);
@@ -500,9 +1538,10 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
     }
   }
 
-  void _finishMatch() {
+  void _finishMatch({bool quit = false}) {
     if (_finished) return;
     _finished = true;
+    _quitEarly = quit;
     _matchTimer?.cancel();
     _questionTimer?.cancel();
     _opponentSub?.cancel();
@@ -511,15 +1550,78 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
     _afkCountTimer?.cancel();
     VoiceService.instance.stopReading();
 
-    final myCorrect = _myAnswers.entries.where((e) {
-      final qi = e.key;
-      return qi < _questions.length && e.value == _questions[qi].correctAnswer;
-    }).length;
+    if (quit) {
+      // Leaving early: never project a final score for either player — only
+      // show what was actually completed up to the point of leaving.
+      _saveAndNavigateQuitEarly();
+      return;
+    }
+
+    final myCorrect = _myCorrectSoFar;
     final myAcc = _questions.isEmpty ? 0.0 : myCorrect / _questions.length;
     final myScore = (1 + myAcc * 35).clamp(1.0, 36.0);
     final opScore = FakeOnlineChallenge.simulateOpponentScore(_questions.length, myAcc);
 
     _saveAndNavigate(myScore, opScore, myAcc);
+  }
+
+  Future<void> _saveAndNavigateQuitEarly() async {
+    final attemptedCount = _myAnswers.length;
+    final myCorrect = _myCorrectSoFar;
+    final oppAttempted = _opponentAnswered.clamp(0, _questions.length);
+
+    final results = List.generate(_questions.length, (i) {
+      final given = _myAnswers[i] ?? '';
+      return QuestionResult(
+        questionId: _questions[i].id,
+        givenAnswer: given,
+        isCorrect: given == _questions[i].correctAnswer,
+        timeSpent: Duration.zero,
+      );
+    });
+    final attempt = ExamAttempt(
+      id: DateTime.now().toIso8601String(),
+      startedAt: DateTime.now(),
+      completedAt: DateTime.now(),
+      setNumber: 1,
+      section: widget.randomMixSubject ? null : widget.section,
+      results: results,
+    );
+    // Save the partial attempt for the player's own history, but skip the
+    // leaderboard — an incomplete match shouldn't count as a ranked score.
+    await DatabaseService.instance.saveAttempt(attempt);
+    final name = await UserProfileService.getDisplayName() ?? 'You';
+
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _OnlineResultScreen(
+          myName: name,
+          opponentName: widget.opponentName,
+          totalQuestions: _questions.length,
+          myCorrect: myCorrect,
+          quitEarly: true,
+          myAnsweredCount: attemptedCount,
+          opponentAnsweredCount: oppAttempted,
+          opponentCorrect: _opponentCorrect,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _applyBetConsequence(bool iWon, bool tie) async {
+    final bet = widget.bet;
+    if (bet == null || tie) return;
+    // Only the "access paused" bet type has real, enforceable teeth in this
+    // app right now (there's no ranking/badge ledger to dock points from) —
+    // so that's the one consequence that's actually applied. The others are
+    // shown on the result screen for flavor.
+    if (bet.type == 'access' && !iWon) {
+      final match = RegExp(r'(\d+)_hours').firstMatch(bet.value);
+      final hours = match != null ? int.tryParse(match.group(1)!) ?? 2 : 2;
+      await UserProfileService.setOnlineAccessPauseUntil(DateTime.now().add(Duration(hours: hours)));
+    }
   }
 
   Future<void> _saveAndNavigate(double myScore, double opScore, double acc) async {
@@ -537,12 +1639,16 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
       startedAt: DateTime.now(),
       completedAt: DateTime.now(),
       setNumber: 1,
-      section: widget.section,
+      section: widget.randomMixSubject ? null : widget.section,
       results: results,
     );
     await DatabaseService.instance.saveAttempt(attempt);
     final name = await UserProfileService.getDisplayName() ?? 'You';
     await DatabaseService.instance.upsertLeaderboardEntry(name, myScore, acc);
+
+    final tie = (myScore - opScore).abs() < 0.1;
+    final iWon = myScore > opScore;
+    await _applyBetConsequence(iWon, tie);
 
     if (!mounted) return;
     Navigator.pushReplacement(
@@ -571,6 +1677,10 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
       } else if (_disconnectWarning) {
         _disconnectTimer?.cancel();
         setState(() => _disconnectWarning = false);
+        // Resume cleanly: if the opponent hadn't finished this question
+        // before the outage, give them a fresh attempt at it now rather
+        // than trying to resurrect a stream that was frozen mid-delay.
+        if (!_opponentDone && !_finished) _startOpponentForQuestion(_qIndex);
       }
     });
   }
@@ -578,10 +1688,15 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
   void _beginDisconnectCountdown() {
     if (_disconnectWarning) return;
     setState(() { _disconnectWarning = true; _disconnectSec = 25; });
+    // Freeze the opponent exactly where they are — no more "thinking" time
+    // ticks by, and no answer can land, while you're offline. This is
+    // resumed (or the round is re-simulated fresh) once you reconnect.
+    _opponentSub?.cancel();
+    _afkCountTimer?.cancel();
     _disconnectTimer = Timer.periodic(const Duration(seconds: 1), (t) {
       if (!mounted) { t.cancel(); return; }
       setState(() => _disconnectSec--);
-      if (_disconnectSec <= 0) { t.cancel(); _finishMatch(); }
+      if (_disconnectSec <= 0) { t.cancel(); _finishMatch(quit: true); }
     });
   }
 
@@ -603,11 +1718,11 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
       barrierDismissible: false,
       builder: (_) => AlertDialog(
         title: const Text('Exit Match?'),
-        content: Text('${widget.opponentName} will be notified that you left. Your progress up to this question will be saved.'),
+        content: Text('${widget.opponentName} will be notified that you left. You\'ll only see your progress up to this question — not a final score.'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Stay')),
           TextButton(
-            onPressed: () { Navigator.pop(context); _finishMatch(); },
+            onPressed: () { Navigator.pop(context); _finishMatch(quit: true); },
             child: Text('Exit', style: TextStyle(color: ActColors.danger)),
           ),
         ],
@@ -631,6 +1746,7 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
     _afkCountTimer?.cancel();
     _focusNode.dispose();
     VoiceService.instance.stopReading();
+    FakeOnlineChallenge.endOpponentSession(_opponentSessionId);
     super.dispose();
   }
 
@@ -639,7 +1755,13 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
     final isDark = Theme.of(context).brightness == Brightness.dark;
     if (_questions.isEmpty) return const Scaffold(body: Center(child: Text('No questions available.')));
     final q = _questions[_qIndex];
-    final myTurn = _phase == _MatchPhase.myTurn && !_showFeedback;
+    // Answering is never gated on the opponent's status — both of you are
+    // working the same question at the same time, independently. This is
+    // just "have I already locked in my answer for this question", and
+    // freezes entirely while you're offline so a disconnect can't cost you.
+    final myTurn = !_showFeedback && !_disconnectWarning;
+    final currentSection = widget.randomMixSubject ? q.section : widget.section;
+    final showCalcButton = currentSection == ActSection.math || currentSection == ActSection.science;
 
     return Focus(
       focusNode: _focusNode,
@@ -649,9 +1771,25 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
         onPopInvoked: (didPop) { if (!didPop) _confirmExit(); },
         child: Scaffold(
           appBar: AppBar(
-            title: Text('${actSectionDisplayName(widget.section)} — Q${_qIndex + 1}/${_questions.length}'),
+            title: Text('${widget.randomMixSubject ? "Random Mix" : actSectionDisplayName(widget.section)} — Q${_qIndex + 1}/${_questions.length}'),
             leading: IconButton(icon: const Icon(Icons.close), onPressed: _confirmExit),
             actions: [
+              // Voice on/off — same toggle as Practice/Full Exam, in case the
+              // user doesn't want questions/feedback read aloud during a match.
+              IconButton(
+                icon: Icon(_voiceEnabled ? Icons.volume_up : Icons.volume_off_outlined,
+                    color: _voiceEnabled ? Colors.white : Colors.white60),
+                tooltip: 'Voice Reading',
+                onPressed: _toggleVoice,
+              ),
+              // Calculator (Math & Science only)
+              if (showCalcButton)
+                IconButton(
+                  icon: Icon(_calcVisible ? Icons.calculate : Icons.calculate_outlined,
+                      color: _calcVisible ? ActColors.accent : Colors.white70),
+                  tooltip: 'Calculator',
+                  onPressed: () => setState(() => _calcVisible = !_calcVisible),
+                ),
               // Match timer
               Padding(
                 padding: const EdgeInsets.only(right: 12),
@@ -664,8 +1802,20 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
               ),
             ],
           ),
-          body: Column(
+          body: Stack(children: [
+            Column(
             children: [
+              // Live scoreboard — always visible at the top of the match
+              _LiveScoreboard(
+                myName: 'You',
+                opponentName: widget.opponentName,
+                myCorrect: _myCorrectSoFar,
+                myAnswered: _myAnswers.length,
+                opponentCorrect: _opponentCorrect,
+                opponentAnswered: _opponentAnswered,
+                isDark: isDark,
+              ),
+
               // Progress bar
               LinearProgressIndicator(
                 value: (_qIndex + 1) / _questions.length,
@@ -695,6 +1845,7 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
                 showFeedback: _showFeedback,
                 opponentName: widget.opponentName,
                 questionSecondsLeft: _questionSecondsLeft,
+                hasTimer: widget.questionTimeLimitSeconds != null,
                 isDark: isDark,
               ),
 
@@ -760,10 +1911,18 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
                 selected: _selected,
                 isLast: _qIndex == _questions.length - 1,
                 onConfirm: _confirmAnswer,
-                onNext: _nextQuestion,
               ),
             ],
-          ),
+            ),
+
+            // Floating calculator overlay
+            if (_calcVisible && showCalcButton)
+              Positioned(
+                right: 12,
+                bottom: 80,
+                child: MiniCalculatorOverlay(onClose: () => setState(() => _calcVisible = false)),
+              ),
+          ]),
         ),
       ),
     );
@@ -773,22 +1932,93 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
 // ── Result screen ─────────────────────────────────────────────────────────────
 class _OnlineResultScreen extends StatelessWidget {
   final String myName, opponentName;
-  final double myScore, opponentScore;
+  final double? myScore, opponentScore;
   final int totalQuestions, myCorrect;
   final ChallengeBetProposal? bet;
+  // Quit-early / disconnected path: no final score is ever shown, only
+  // how far each player actually got before the match ended.
+  final bool quitEarly;
+  final int? myAnsweredCount;
+  final int? opponentAnsweredCount;
+  final int? opponentCorrect;
 
   const _OnlineResultScreen({
     required this.myName, required this.opponentName,
-    required this.myScore, required this.opponentScore,
+    this.myScore, this.opponentScore,
     required this.totalQuestions, required this.myCorrect,
     this.bet,
+    this.quitEarly = false,
+    this.myAnsweredCount,
+    this.opponentAnsweredCount,
+    this.opponentCorrect,
   });
 
   @override
   Widget build(BuildContext context) {
+    if (quitEarly) return _buildQuitEarly(context);
+    return _buildCompleted(context);
+  }
+
+  // ── Match ended early (you left, or disconnected) ─────────────────────────
+  Widget _buildQuitEarly(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final iWon = myScore > opponentScore;
-    final tie  = (myScore - opponentScore).abs() < 0.1;
+    final myAnswered = myAnsweredCount ?? 0;
+    final oppAnswered = opponentAnsweredCount ?? 0;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Match Ended')),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(children: [
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(colors: [ActColors.midGray, ActColors.primaryDark],
+                  begin: Alignment.topLeft, end: Alignment.bottomRight),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Column(children: [
+              const Text('Match Ended Early', style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.w900)),
+              const SizedBox(height: 6),
+              Text(
+                'No final score is shown for a match that wasn\'t completed — just how far each of you got.',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white70, fontSize: 12.5, height: 1.4),
+              ),
+            ]),
+          ),
+          const SizedBox(height: 24),
+          Row(children: [
+            Expanded(child: _ProgressPlayerCard(name: myName, isMe: true, answered: myAnswered, correct: myCorrect, total: totalQuestions)),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Text('VS', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 20, color: ActColors.primary)),
+            ),
+            Expanded(child: _ProgressPlayerCard(name: opponentName, isMe: false, answered: oppAnswered, correct: opponentCorrect, total: totalQuestions)),
+          ]),
+          const SizedBox(height: 24),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: ActColors.primary,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
+              onPressed: () => Navigator.popUntil(context, (r) => r.isFirst),
+              child: const Text('Back to Home', style: TextStyle(fontWeight: FontWeight.w700)),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  // ── Match completed normally ──────────────────────────────────────────────
+  Widget _buildCompleted(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final myScoreVal = myScore ?? 1.0;
+    final opScoreVal = opponentScore ?? 1.0;
+    final iWon = myScoreVal > opScoreVal;
+    final tie  = (myScoreVal - opScoreVal).abs() < 0.1;
     final myColor = iWon ? ActColors.success : (tie ? ActColors.warning : ActColors.danger);
     final opColor = !iWon ? ActColors.success : (tie ? ActColors.warning : ActColors.danger);
 
@@ -824,12 +2054,12 @@ class _OnlineResultScreen extends StatelessWidget {
 
           // Score comparison
           Row(children: [
-            _ResultPlayerCard(name: myName, score: myScore, isMe: true, color: myColor, correct: myCorrect, total: totalQuestions),
+            _ResultPlayerCard(name: myName, score: myScoreVal, isMe: true, color: myColor, correct: myCorrect, total: totalQuestions),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Text('VS', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 20, color: ActColors.primary)),
             ),
-            _ResultPlayerCard(name: opponentName, score: opponentScore, isMe: false, color: opColor, correct: null, total: totalQuestions),
+            _ResultPlayerCard(name: opponentName, score: opScoreVal, isMe: false, color: opColor, correct: null, total: totalQuestions),
           ]),
 
           // Bet outcome
@@ -852,6 +2082,11 @@ class _OnlineResultScreen extends StatelessWidget {
                   style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13,
                     color: iWon ? ActColors.success : (tie ? ActColors.warning : ActColors.danger)),
                 ),
+                if (bet!.type == 'access' && !iWon && !tie) ...[
+                  const SizedBox(height: 6),
+                  Text('Your Online Challenge access is now paused for the agreed time.',
+                      style: TextStyle(fontSize: 11, color: ActColors.danger)),
+                ],
               ]),
             ),
           ],
@@ -869,6 +2104,42 @@ class _OnlineResultScreen extends StatelessWidget {
           ),
         ]),
       ),
+    );
+  }
+}
+
+class _ProgressPlayerCard extends StatelessWidget {
+  final String name;
+  final bool isMe;
+  final int answered;
+  final int? correct;
+  final int total;
+  const _ProgressPlayerCard({required this.name, required this.isMe, required this.answered, this.correct, required this.total});
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: isDark ? ActColors.darkCard : Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: ActColors.midGray.withOpacity(0.25)),
+      ),
+      child: Column(children: [
+        CircleAvatar(radius: 20, backgroundColor: isMe ? ActColors.primary : ActColors.info,
+            child: Text(name.substring(0, 1).toUpperCase(),
+                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16))),
+        const SizedBox(height: 8),
+        Text(name, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 11), overflow: TextOverflow.ellipsis),
+        const SizedBox(height: 6),
+        Text('$answered', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 24, color: ActColors.midGray)),
+        Text('of $total answered', style: TextStyle(fontSize: 10, color: ActColors.midGray)),
+        if (correct != null) ...[
+          const SizedBox(height: 4),
+          Text('$correct correct', style: TextStyle(fontSize: 10, color: ActColors.midGray)),
+        ],
+      ]),
     );
   }
 }
@@ -931,6 +2202,52 @@ class _ActivityBanner extends StatelessWidget {
   }
 }
 
+class _LiveScoreboard extends StatelessWidget {
+  final String myName, opponentName;
+  final int myCorrect, myAnswered, opponentCorrect, opponentAnswered;
+  final bool isDark;
+  const _LiveScoreboard({
+    required this.myName, required this.opponentName,
+    required this.myCorrect, required this.myAnswered,
+    required this.opponentCorrect, required this.opponentAnswered,
+    required this.isDark,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      color: isDark ? ActColors.darkSurface : const Color(0xFFF3F3F3),
+      child: Row(children: [
+        Expanded(
+          child: Row(children: [
+            CircleAvatar(radius: 11, backgroundColor: ActColors.primary,
+                child: Text(myName.substring(0, 1).toUpperCase(),
+                    style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w800))),
+            const SizedBox(width: 6),
+            Flexible(child: Text(myName, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis)),
+            const SizedBox(width: 6),
+            Text('$myCorrect/$myAnswered', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: ActColors.primary)),
+          ]),
+        ),
+        Text('VS', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: ActColors.midGray)),
+        Expanded(
+          child: Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+            Text('$opponentCorrect/$opponentAnswered', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: ActColors.info)),
+            const SizedBox(width: 6),
+            Flexible(child: Text(opponentName, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis, textAlign: TextAlign.right)),
+            const SizedBox(width: 6),
+            CircleAvatar(radius: 11, backgroundColor: ActColors.info,
+                child: Text(opponentName.substring(0, 1).toUpperCase(),
+                    style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w800))),
+          ]),
+        ),
+      ]),
+    );
+  }
+}
+
 class _OpponentStatusBar extends StatelessWidget {
   final String name, status;
   final int answered, total, afkSec;
@@ -981,14 +2298,15 @@ class _TurnBanner extends StatelessWidget {
   final bool myTurn, showFeedback;
   final String opponentName;
   final int questionSecondsLeft;
+  final bool hasTimer;
   final bool isDark;
-  const _TurnBanner({required this.myTurn, required this.showFeedback, required this.opponentName, required this.questionSecondsLeft, required this.isDark});
+  const _TurnBanner({required this.myTurn, required this.showFeedback, required this.opponentName, required this.questionSecondsLeft, this.hasTimer = true, required this.isDark});
 
   @override
   Widget build(BuildContext context) {
     if (showFeedback) return const SizedBox.shrink();
     final color = myTurn ? ActColors.primary : ActColors.midGray;
-    final urgent = myTurn && questionSecondsLeft <= 15;
+    final urgent = hasTimer && myTurn && questionSecondsLeft <= 15;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -1001,11 +2319,11 @@ class _TurnBanner extends StatelessWidget {
             size: 15, color: urgent ? ActColors.danger : color),
         const SizedBox(width: 8),
         Expanded(child: Text(
-          myTurn ? 'Your turn — answer now!' : 'Waiting for $opponentName...',
+          myTurn ? 'Answer now — no need to wait on $opponentName' : 'Waiting for $opponentName...',
           style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700,
               color: urgent ? ActColors.danger : color),
         )),
-        if (myTurn)
+        if (myTurn && hasTimer)
           Text('${questionSecondsLeft}s',
               style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800,
                   color: urgent ? ActColors.danger : color)),
@@ -1037,8 +2355,8 @@ class _DisconnectBanner extends StatelessWidget {
 class _MatchBottomBar extends StatelessWidget {
   final bool myTurn, showFeedback, isLast;
   final String? selected;
-  final VoidCallback onConfirm, onNext;
-  const _MatchBottomBar({required this.myTurn, required this.showFeedback, required this.selected, required this.isLast, required this.onConfirm, required this.onNext});
+  final VoidCallback onConfirm;
+  const _MatchBottomBar({required this.myTurn, required this.showFeedback, required this.selected, required this.isLast, required this.onConfirm});
 
   @override
   Widget build(BuildContext context) => Container(
@@ -1059,15 +2377,17 @@ class _MatchBottomBar extends StatelessWidget {
           child: const Text('Confirm', style: TextStyle(fontWeight: FontWeight.w700)),
         )
       else
-        FilledButton.icon(
-          style: FilledButton.styleFrom(
-            backgroundColor: ActColors.primary,
-            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 13),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-          ),
-          onPressed: onNext,
-          icon: Icon(isLast ? Icons.done_all : Icons.arrow_forward, size: 18),
-          label: Text(isLast ? 'Finish' : 'Next', style: const TextStyle(fontWeight: FontWeight.w700)),
+        // No manual "Next" button — this is a live match, so as soon as both
+        // sides are done (or time runs out) it moves on by itself.
+        Expanded(
+          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: ActColors.primary)),
+            const SizedBox(width: 10),
+            Text(
+              isLast ? 'Finishing up...' : 'Moving to the next question...',
+              style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: ActColors.midGray),
+            ),
+          ]),
         ),
     ]),
   );
@@ -1181,9 +2501,15 @@ class _ErrorBanner extends StatelessWidget {
 class _MatchedCard extends StatelessWidget {
   final String opponentName;
   final ChallengeBetProposal? pendingBet, activeBet;
-  final VoidCallback onAcceptBet, onDeclineBet;
+  final bool proposedByMe;
+  final VoidCallback onAcceptBet, onDeclineBet, onRemoveOpponent;
   final bool isDark;
-  const _MatchedCard({required this.opponentName, this.pendingBet, this.activeBet, required this.onAcceptBet, required this.onDeclineBet, required this.isDark});
+  const _MatchedCard({
+    required this.opponentName, this.pendingBet, this.activeBet,
+    this.proposedByMe = false,
+    required this.onAcceptBet, required this.onDeclineBet, required this.onRemoveOpponent,
+    required this.isDark,
+  });
 
   @override
   Widget build(BuildContext context) => Container(
@@ -1201,7 +2527,7 @@ class _MatchedCard extends StatelessWidget {
             child: Text('VS', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18, color: ActColors.primary))),
         _PlayerPill(name: opponentName, isUser: false),
       ]),
-      if (pendingBet != null) ...[
+      if (pendingBet != null && !proposedByMe) ...[
         const SizedBox(height: 14),
         Container(
           padding: const EdgeInsets.all(12),
@@ -1222,10 +2548,19 @@ class _MatchedCard extends StatelessWidget {
             ]),
           ]),
         ),
+      ] else if (pendingBet != null && proposedByMe) ...[
+        const SizedBox(height: 10),
+        Text('Waiting for $opponentName to respond to your bet...', style: TextStyle(fontSize: 11.5, color: ActColors.warning, fontWeight: FontWeight.w600)),
       ] else if (activeBet != null) ...[
         const SizedBox(height: 8),
         Text('Active bet: ${activeBet!.description}', style: TextStyle(fontSize: 11, color: ActColors.warning, fontWeight: FontWeight.w600)),
       ],
+      const SizedBox(height: 10),
+      TextButton.icon(
+        onPressed: onRemoveOpponent,
+        icon: Icon(Icons.person_remove_outlined, size: 15, color: ActColors.danger),
+        label: Text('Not satisfied? Remove & search again', style: TextStyle(fontSize: 11, color: ActColors.danger)),
+      ),
     ]),
   );
 }
@@ -1251,11 +2586,17 @@ class _ChatBox extends StatelessWidget {
   final ScrollController scrollCtrl;
   final VoidCallback onSend;
   final bool isDark;
-  const _ChatBox({required this.messages, required this.controller, required this.scrollCtrl, required this.onSend, required this.isDark});
+  final bool opponentTyping;
+  final String opponentName;
+  const _ChatBox({
+    required this.messages, required this.controller, required this.scrollCtrl,
+    required this.onSend, required this.isDark,
+    this.opponentTyping = false, this.opponentName = '',
+  });
 
   @override
   Widget build(BuildContext context) => Container(
-    height: 150,
+    height: 170,
     padding: const EdgeInsets.all(10),
     decoration: BoxDecoration(
       color: isDark ? ActColors.darkCard : const Color(0xFFF5F5F5),
@@ -1265,8 +2606,24 @@ class _ChatBox extends StatelessWidget {
     child: Column(children: [
       Expanded(child: ListView.builder(
         controller: scrollCtrl,
-        itemCount: messages.length,
+        itemCount: messages.length + (opponentTyping ? 1 : 0),
         itemBuilder: (_, i) {
+          if (opponentTyping && i == messages.length) {
+            return Align(
+              alignment: Alignment.centerLeft,
+              child: Container(
+                margin: const EdgeInsets.only(bottom: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: isDark ? ActColors.darkSurface : Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: isDark ? ActColors.darkBorder : ActColors.lightBorder),
+                ),
+                child: Text('$opponentName is typing...',
+                    style: TextStyle(fontSize: 11, fontStyle: FontStyle.italic, color: ActColors.midGray)),
+              ),
+            );
+          }
           final m = messages[i];
           final isMe = m['sender'] == 'You';
           return Align(

@@ -19,12 +19,23 @@ class SectionScreen extends StatefulWidget {
   final ActSection section;
   final int? questionCount; // null = full count per section
   final bool isChallengeMode;
+  // When true, questions are pooled from every subject instead of just
+  // `section` (used by the WiFi Challenge "Random Mix" subject option).
+  // Defaults to false so every other caller of SectionScreen is unaffected.
+  final bool randomMixSubjects;
+  // When set (WiFi Challenge host can configure this), each question gets
+  // its own countdown; running out auto-skips it and moves on immediately,
+  // no manual "Next" tap needed. Null (the default) preserves the normal
+  // self-paced practice behaviour for every other caller.
+  final int? questionTimeLimitSeconds;
 
   const SectionScreen({
     super.key,
     required this.section,
     this.questionCount,
     this.isChallengeMode = false,
+    this.randomMixSubjects = false,
+    this.questionTimeLimitSeconds,
   });
 
   @override
@@ -53,6 +64,11 @@ class _SectionScreenState extends State<SectionScreen> {
   late Timer _timer;
   int _secondsLeft = 0;
 
+  // Per-question timer (only active when widget.questionTimeLimitSeconds is set)
+  Timer? _qTimer;
+  int _qSecondsLeft = 0;
+  bool _qAdvancing = false;
+
   final PageController _pageCtrl = PageController();
   final FocusNode _focusNode = FocusNode();
 
@@ -63,18 +79,27 @@ class _SectionScreenState extends State<SectionScreen> {
     _totalSeconds = _timeLimitFor(widget.section);
     _secondsLeft = _totalSeconds;
     _startTimer();
+    _startQuestionTimerIfNeeded();
     _loadVoicePrefs();
     WidgetsBinding.instance.addPostFrameCallback((_) => _focusNode.requestFocus());
   }
 
   List<ActQuestion> _buildQuestionList() {
-    final pool = questionsForSection(widget.section);
+    final pool = widget.randomMixSubjects ? questionsForRandomMix() : questionsForSection(widget.section);
     if (pool.isEmpty) return [];
     final count = widget.questionCount ?? pool.length;
     if (count >= pool.length) return List.from(pool);
     final shuffled = List.from(pool)..shuffle(Random());
     return shuffled.take(count).cast<ActQuestion>().toList();
   }
+
+  // The subject of the question currently on screen — for a Random Mix
+  // session this comes from the question itself (each question keeps track
+  // of its own subject) rather than the single `widget.section` value.
+  ActSection get _currentQuestionSection =>
+      widget.randomMixSubjects && _questions.isNotEmpty
+          ? _questions[_current].section
+          : widget.section;
 
   int _timeLimitFor(ActSection section) {
     switch (section) {
@@ -94,6 +119,35 @@ class _SectionScreenState extends State<SectionScreen> {
         return;
       }
       setState(() => _secondsLeft--);
+    });
+  }
+
+  // Per-question timer — only runs when the host configured one (WiFi
+  // Challenge). If it runs out before this question is answered, it's
+  // auto-skipped and the app moves straight to the next question, no
+  // manual "Next" tap required.
+  void _startQuestionTimerIfNeeded() {
+    _qTimer?.cancel();
+    if (widget.questionTimeLimitSeconds == null) return;
+    // Already-answered question (e.g. navigated back to it) doesn't need a
+    // countdown — nothing left to force a decision on.
+    if (_answers.containsKey(_current)) return;
+    _qAdvancing = false;
+    _qSecondsLeft = widget.questionTimeLimitSeconds!;
+    _qTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_paused || _qAdvancing) return;
+      setState(() => _qSecondsLeft--);
+      if (_qSecondsLeft <= 0) {
+        _qAdvancing = true;
+        _qTimer?.cancel();
+        if (!_answers.containsKey(_current)) {
+          setState(() {
+            _answers[_current] = ''; // skipped — time's up
+            _showFeedback = true;
+          });
+        }
+        Future.delayed(const Duration(milliseconds: 600), _nextQuestion);
+      }
     });
   }
 
@@ -121,9 +175,9 @@ class _SectionScreenState extends State<SectionScreen> {
       onResult: (letter) {
         if (mounted) setState(() { _listening = false; _selectAnswer(letter); });
       },
-      onUnrecognised: () {
+      onUnrecognised: (reason) {
         if (mounted) setState(() => _listening = false);
-        _showSnack('Could not detect a valid answer. Please say A, B, C, or D clearly.');
+        _showSnack(reason);
       },
     );
   }
@@ -135,6 +189,7 @@ class _SectionScreenState extends State<SectionScreen> {
 
   void _confirmAnswer() {
     if (_selectedAnswer == null || _showFeedback) return;
+    _qTimer?.cancel(); // answered before time ran out — stop the per-question clock
     setState(() {
       _answers[_current] = _selectedAnswer!;
       _showFeedback = true;
@@ -156,6 +211,7 @@ class _SectionScreenState extends State<SectionScreen> {
         _showFeedback = _answers.containsKey(_current);
       });
       _pageCtrl.nextPage(duration: const Duration(milliseconds: 220), curve: Curves.easeInOut);
+      _startQuestionTimerIfNeeded();
       if (_voiceEnabled) _readCurrentQuestion();
     } else {
       _finishExam();
@@ -170,11 +226,13 @@ class _SectionScreenState extends State<SectionScreen> {
         _showFeedback = _answers.containsKey(_current);
       });
       _pageCtrl.previousPage(duration: const Duration(milliseconds: 220), curve: Curves.easeInOut);
+      _startQuestionTimerIfNeeded();
     }
   }
 
   void _finishExam() {
     _timer.cancel();
+    _qTimer?.cancel();
     VoiceService.instance.stopReading();
     _saveAttempt();
   }
@@ -242,6 +300,10 @@ class _SectionScreenState extends State<SectionScreen> {
     final newVal = !_micEnabled;
     await VoiceService.instance.setSttEnabled(newVal);
     setState(() => _micEnabled = newVal);
+    // Turning the mic on should also start listening right away — otherwise
+    // a single tap looks like it "did nothing" because it only flips a
+    // setting, and the user's spoken answer right after is never captured.
+    if (newVal) _startListening();
   }
 
   void _confirmExit() {
@@ -282,6 +344,7 @@ class _SectionScreenState extends State<SectionScreen> {
   @override
   void dispose() {
     _timer.cancel();
+    _qTimer?.cancel();
     _pageCtrl.dispose();
     _focusNode.dispose();
     VoiceService.instance.stopReading();
@@ -299,8 +362,25 @@ class _SectionScreenState extends State<SectionScreen> {
       onKeyEvent: _onKey,
       child: Scaffold(
         appBar: AppBar(
-          title: Text(actSectionDisplayName(widget.section)),
+          title: Text(widget.randomMixSubjects ? 'Random Mix' : actSectionDisplayName(widget.section)),
           actions: [
+            // Per-question timer (only set for WiFi Challenge rooms with a timer)
+            if (widget.questionTimeLimitSeconds != null)
+              Padding(
+                padding: const EdgeInsets.only(right: 2),
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: (_qSecondsLeft <= 10 ? ActColors.danger : ActColors.accent).withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text('${_qSecondsLeft}s',
+                        style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12,
+                            color: _qSecondsLeft <= 10 ? ActColors.danger : ActColors.accent)),
+                  ),
+                ),
+              ),
             // Timer
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4),
@@ -335,7 +415,7 @@ class _SectionScreenState extends State<SectionScreen> {
               onPressed: _micEnabled ? _startListening : _toggleMic,
             ),
             // Calculator (Math & Science only)
-            if (widget.section == ActSection.math || widget.section == ActSection.science)
+            if (_currentQuestionSection == ActSection.math || _currentQuestionSection == ActSection.science)
               IconButton(
                 icon: Icon(_calcVisible ? Icons.calculate : Icons.calculate_outlined,
                     color: _calcVisible ? ActColors.accent : Colors.white70),
@@ -415,7 +495,7 @@ class _SectionScreenState extends State<SectionScreen> {
                 ],
               ),
                   // Floating calculator overlay
-                  if (_calcVisible && (widget.section == ActSection.math || widget.section == ActSection.science))
+                  if (_calcVisible && (_currentQuestionSection == ActSection.math || _currentQuestionSection == ActSection.science))
                     Positioned(
                       right: 12, bottom: 100,
                       child: _MiniCalculator(
