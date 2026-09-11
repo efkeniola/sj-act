@@ -1690,6 +1690,9 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
     if (name != null) {
       await DatabaseService.instance.upsertLeaderboardEntry(name, myScore, acc);
     }
+    // Separate from the guarded write above: the result screen always
+    // needs something non-null to display, even before a real name exists.
+    final displayName = name ?? 'You';
 
     final tie = (myScore - opScore).abs() < 0.1;
     final iWon = myScore > opScore;
@@ -1700,7 +1703,7 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
       context,
       MaterialPageRoute(
         builder: (_) => _OnlineResultScreen(
-          myName: name,
+          myName: displayName,
           myScore: myScore,
           opponentName: widget.opponentName,
           opponentScore: opScore,
