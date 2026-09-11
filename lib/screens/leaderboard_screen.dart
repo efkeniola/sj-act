@@ -23,6 +23,9 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
   int? _userRank;
   String? _lastMilestone;
   Timer? _refreshTimer;
+  DateTime? _badgeSuspendedUntil;
+  int _betRankingPoints = 0;
+  String? _topChallengerToday;
 
   @override
   void initState() {
@@ -45,6 +48,13 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
     _displayName = await UserProfileService.getDisplayName() ?? 'You';
     _groupId = await ActLeaderboardService.getOrCreateGroupId();
 
+    // Remove any stray placeholder-named row left over from before
+    // leaderboard writes were guarded on a real display name (this is
+    // what caused a duplicate "you" entry to show up on the board).
+    await DatabaseService.instance.pruneStalePlaceholderLeaderboardEntries(
+      await UserProfileService.getDisplayName(),
+    );
+
     // Get user's own entries
     final ownRows = await DatabaseService.instance.getLeaderboardEntries();
     final realRows = ownRows.map((r) => {
@@ -54,7 +64,19 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
       'attempts': r['attempts'] ?? 1,
     }).toList();
 
-    final entries = await ActLeaderboardService.buildMergedBoard(realRows, sync: sync);
+    // Bet-consequence state that affects how this board is rendered: a
+    // lost "badge" bet hides the user's own rank badge for 24h, a lost
+    // "ranking_reset" bet drops it one tier for this session, and a won
+    // "bragging_rights" bet pins someone as Top Challenger for the day.
+    _badgeSuspendedUntil = await UserProfileService.getChallengerBadgeSuspendedUntil();
+    _betRankingPoints = await UserProfileService.getBetRankingPoints();
+    _topChallengerToday = await UserProfileService.getTopChallengerToday();
+
+    final entries = await ActLeaderboardService.buildMergedBoard(
+      realRows,
+      sync: sync,
+      suppressOwnBadge: _badgeSuspendedUntil != null,
+    );
 
     // Find user rank
     int? userRank;
@@ -229,6 +251,83 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
                   Text(
                     _rankLabel(_userRank!),
                     style: TextStyle(fontSize: 11, color: ActColors.accent),
+                  ),
+                ],
+              ),
+            ),
+
+          // Bet ranking points — persistent tally from "ranking" bets.
+          if (_betRankingPoints != 0)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              color: (_betRankingPoints > 0 ? ActColors.success : ActColors.danger).withOpacity(0.08),
+              child: Row(
+                children: [
+                  Icon(Icons.military_tech_outlined, size: 15,
+                      color: _betRankingPoints > 0 ? ActColors.success : ActColors.danger),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Bet ranking points: ${_betRankingPoints > 0 ? '+' : ''}$_betRankingPoints',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700,
+                        color: _betRankingPoints > 0 ? ActColors.success : ActColors.danger),
+                  ),
+                ],
+              ),
+            ),
+
+          // Badge suspended — lost a "badge" bet.
+          if (_badgeSuspendedUntil != null)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              color: ActColors.danger.withOpacity(0.08),
+              child: Row(
+                children: [
+                  Icon(Icons.block, size: 15, color: ActColors.danger),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Your Challenger badge is suspended (lost a bet) until '
+                      '${_badgeSuspendedUntil!.hour.toString().padLeft(2, '0')}:${_badgeSuspendedUntil!.minute.toString().padLeft(2, '0')}.',
+                      style: TextStyle(fontSize: 11, color: ActColors.danger),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+          // Tier drop active — lost a "ranking_reset" bet, for this session.
+          if (ActLeaderboardService.isTierDropActiveThisSession)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              color: ActColors.danger.withOpacity(0.08),
+              child: Row(
+                children: [
+                  Icon(Icons.trending_down, size: 15, color: ActColors.danger),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Your leaderboard tier is dropped one level for this session (lost a bet).',
+                    style: TextStyle(fontSize: 11, color: ActColors.danger),
+                  ),
+                ],
+              ),
+            ),
+
+          // Top Challenger pin — won a "bragging_rights" bet today.
+          if (_topChallengerToday != null)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              color: ActColors.warning.withOpacity(0.10),
+              child: Row(
+                children: [
+                  const Icon(Icons.emoji_events_outlined, size: 15, color: Colors.amber),
+                  const SizedBox(width: 8),
+                  Text(
+                    '🏆 Top Challenger today: $_topChallengerToday',
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Colors.amber),
                   ),
                 ],
               ),

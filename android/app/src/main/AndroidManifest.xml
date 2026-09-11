@@ -67,5 +67,16 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
+        <!-- Required since Android 11 (API 30) package-visibility rules: without
+             this, the speech_to_text plugin cannot see/bind to the device's
+             speech-recognition service, so voice answers (e.g. saying "A")
+             silently fail to register on many devices even though the mic
+             icon appears to be listening. -->
+        <intent>
+            <action android:name="android.speech.RecognitionService"/>
+        </intent>
+        <intent>
+            <action android:name="android.speech.action.RECOGNIZE_SPEECH"/>
+        </intent>
     </queries>
 </manifest>

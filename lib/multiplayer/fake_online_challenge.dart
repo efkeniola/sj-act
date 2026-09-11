@@ -702,11 +702,13 @@ class FakeOnlineChallenge {
       if (_rng.nextDouble() > proposalChance) return null;
     }
 
+    final rankingPoints = _rng.nextInt(5) + 1;
+    final accessHours = (_rng.nextInt(4) + 1) * 2;
     final bets = [
       ChallengeBetProposal(
         type: 'ranking',
-        value: '${_rng.nextInt(5) + 1}_points',
-        description: 'Winner gains ${_rng.nextInt(5) + 1} ranking points; loser loses the same.',
+        value: '${rankingPoints}_points',
+        description: 'Winner gains $rankingPoints ranking points; loser loses the same.',
       ),
       ChallengeBetProposal(
         type: 'badge',
@@ -715,8 +717,8 @@ class FakeOnlineChallenge {
       ),
       ChallengeBetProposal(
         type: 'access',
-        value: '${(_rng.nextInt(4) + 1) * 2}_hours',
-        description: 'Loser\'s online challenge access is paused for ${(_rng.nextInt(4) + 1) * 2} hours.',
+        value: '${accessHours}_hours',
+        description: 'Loser\'s online challenge access is paused for $accessHours hours.',
       ),
       ChallengeBetProposal(
         type: 'ranking_reset',

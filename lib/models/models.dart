@@ -110,6 +110,13 @@ class ExamAttempt {
   final int setNumber;
   final ActSection? section;
   final List<QuestionResult> results;
+  // True only for the per-section rows saved as part of a completed FULL
+  // exam run (exam_mode_screen). Quick single-section practice sessions
+  // leave this false. Score-prediction features must only ever be
+  // computed from isFullExam == true attempts — a handful of practice
+  // questions in one subject isn't a valid basis for an ACT composite
+  // prediction, and previously the app was mixing the two together.
+  final bool isFullExam;
 
   ExamAttempt({
     required this.id,
@@ -118,6 +125,7 @@ class ExamAttempt {
     required this.setNumber,
     this.section,
     required this.results,
+    this.isFullExam = false,
   });
 
   int get correctCount => results.where((r) => r.isCorrect).length;

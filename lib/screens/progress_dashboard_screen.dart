@@ -56,6 +56,10 @@ class _ProgressDashboardScreenState extends State<ProgressDashboardScreen>
   Future<void> _load() async {
     final attempts = await DatabaseService.instance.getAllAttempts();
     final target = await ExamSettingsService.getTargetScore();
+    // Score/subject predictions must only ever be built from completed FULL
+    // exam attempts — a quick single-section practice run isn't a valid
+    // basis for an ACT score prediction.
+    final predictionAttempts = attempts.where((a) => a.isFullExam).toList();
 
     // Aggregate per section
     final Map<ActSection, List<double>> sectionScores = {};
@@ -67,7 +71,7 @@ class _ProgressDashboardScreenState extends State<ProgressDashboardScreen>
       for (final s in ActSection.values) s: {}
     };
 
-    for (final attempt in attempts) {
+    for (final attempt in predictionAttempts) {
       final sec = attempt.section;
       if (sec == null) continue;
 

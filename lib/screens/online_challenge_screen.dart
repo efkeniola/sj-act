@@ -59,6 +59,7 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
 
   // Bet consequence: block starting a new search while paused
   DateTime? _accessPauseUntil;
+  bool _practiceRequired = false;
 
   // Real-internet monitoring for the matched lobby (chat/bet/ready) phase —
   // the match screen already checks this continuously once gameplay
@@ -117,7 +118,8 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
 
   Future<void> _checkAccessPause() async {
     final until = await UserProfileService.getOnlineAccessPauseUntil();
-    if (mounted) setState(() => _accessPauseUntil = until);
+    final practiceRequired = await UserProfileService.getRequiresPracticeBeforeOnlineChallenge();
+    if (mounted) setState(() { _accessPauseUntil = until; _practiceRequired = practiceRequired; });
   }
 
   @override
@@ -134,6 +136,7 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
 
   void _startSearch() {
     if (_accessPauseUntil != null && _accessPauseUntil!.isAfter(DateTime.now())) return;
+    if (_practiceRequired) return;
     setState(() {
       _searching = true;
       _statusMsg = 'Connecting...';
@@ -416,6 +419,10 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final paused = _accessPauseUntil != null && _accessPauseUntil!.isAfter(DateTime.now());
+    // A lost "study_task" bet blocks starting/joining another Online
+    // Challenge match, same as an access-pause bet, until a practice
+    // section is completed (see section_screen.dart's _finishSection).
+    final blocked = paused || _practiceRequired;
     return Scaffold(
       appBar: AppBar(title: const Text('Online Challenge')),
       body: SingleChildScrollView(
@@ -431,7 +438,7 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
-                onPressed: _setupLocked ? null : _openActiveRooms,
+                onPressed: (_setupLocked || blocked) ? null : _openActiveRooms,
                 icon: const Icon(Icons.groups_outlined, size: 18),
                 label: const Text('Browse Active Rooms', style: TextStyle(fontWeight: FontWeight.w700)),
                 style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 13)),
@@ -441,6 +448,9 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
 
             if (paused) ...[
               _ErrorBanner(msg: 'Online Challenge access is paused until ${_accessPauseUntil!.hour.toString().padLeft(2, '0')}:${_accessPauseUntil!.minute.toString().padLeft(2, '0')} (bet outcome).'),
+              const SizedBox(height: 16),
+            ] else if (_practiceRequired) ...[
+              _ErrorBanner(msg: 'You lost a bet that requires finishing one practice set before your next Online Challenge. Complete a practice section to unlock this.'),
               const SizedBox(height: 16),
             ],
 
@@ -577,7 +587,7 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
                     ),
                     icon: const Icon(Icons.public),
                     label: const Text('Find Opponent', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
-                    onPressed: paused ? null : _startSearch,
+                    onPressed: blocked ? null : _startSearch,
                   ),
                 ),
               ],
@@ -1613,14 +1623,45 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
   Future<void> _applyBetConsequence(bool iWon, bool tie) async {
     final bet = widget.bet;
     if (bet == null || tie) return;
-    // Only the "access paused" bet type has real, enforceable teeth in this
-    // app right now (there's no ranking/badge ledger to dock points from) —
-    // so that's the one consequence that's actually applied. The others are
-    // shown on the result screen for flavor.
-    if (bet.type == 'access' && !iWon) {
-      final match = RegExp(r'(\d+)_hours').firstMatch(bet.value);
-      final hours = match != null ? int.tryParse(match.group(1)!) ?? 2 : 2;
-      await UserProfileService.setOnlineAccessPauseUntil(DateTime.now().add(Duration(hours: hours)));
+    switch (bet.type) {
+      case 'access':
+        if (!iWon) {
+          final match = RegExp(r'(\d+)_hours').firstMatch(bet.value);
+          final hours = match != null ? int.tryParse(match.group(1)!) ?? 2 : 2;
+          await UserProfileService.setOnlineAccessPauseUntil(DateTime.now().add(Duration(hours: hours)));
+        }
+        break;
+      case 'study_task':
+        if (!iWon) {
+          await UserProfileService.setRequiresPracticeBeforeOnlineChallenge(true);
+        }
+        break;
+      case 'ranking':
+        {
+          // Zero-sum: winner gains the points, loser loses the same amount.
+          final match = RegExp(r'(\d+)_points').firstMatch(bet.value);
+          final pts = match != null ? int.tryParse(match.group(1)!) ?? 1 : 1;
+          await UserProfileService.addBetRankingPoints(iWon ? pts : -pts);
+        }
+        break;
+      case 'badge':
+        if (!iWon) {
+          await UserProfileService.setChallengerBadgeSuspendedFor(const Duration(hours: 24));
+        }
+        break;
+      case 'ranking_reset':
+        if (!iWon) {
+          ActLeaderboardService.activateTierDropForSession();
+        }
+        break;
+      case 'bragging_rights':
+        {
+          final name = iWon
+              ? (await UserProfileService.getDisplayName() ?? 'You')
+              : widget.opponentName;
+          await UserProfileService.setTopChallengerToday(name);
+        }
+        break;
     }
   }
 
@@ -1643,8 +1684,12 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
       results: results,
     );
     await DatabaseService.instance.saveAttempt(attempt);
-    final name = await UserProfileService.getDisplayName() ?? 'You';
-    await DatabaseService.instance.upsertLeaderboardEntry(name, myScore, acc);
+    // Only write once a real display name is known — a placeholder
+    // fallback leaves a permanent duplicate "you" row on the leaderboard.
+    final name = await UserProfileService.getDisplayName();
+    if (name != null) {
+      await DatabaseService.instance.upsertLeaderboardEntry(name, myScore, acc);
+    }
 
     final tie = (myScore - opScore).abs() < 0.1;
     final iWon = myScore > opScore;
@@ -1712,7 +1757,29 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
     return KeyEventResult.ignored;
   }
 
+  // True for the final 3 questions of a match that has an accepted bet
+  // riding on it — this is the window where exiting is locked out so the
+  // bet consequence can't be dodged by quitting just before losing.
+  bool get _exitLockedByBet =>
+      widget.bet != null && (_questions.length - _qIndex) <= 3;
+
+  int get _questionsUntilExitUnlocked =>
+      (_questions.length - _qIndex).clamp(0, 3);
+
   void _confirmExit() {
+    // Once an accepted bet is on the line and the match is down to its
+    // final 3 questions, quitting is locked out — it used to let a player
+    // who was about to lose dodge the bet consequence entirely by exiting
+    // right before the match ended (bet consequences were only ever
+    // applied on a normal finish, never on a quit). Forcing the match out
+    // this close to the end is what actually makes the bet consequence
+    // enforceable.
+    if (_exitLockedByBet) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('You have a bet riding on this match — you can\'t exit in the final $_questionsUntilExitUnlocked question${_questionsUntilExitUnlocked == 1 ? '' : 's'}.'),
+      ));
+      return;
+    }
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -1772,7 +1839,18 @@ class _OnlineChallengeMatchScreenState extends State<OnlineChallengeMatchScreen>
         child: Scaffold(
           appBar: AppBar(
             title: Text('${widget.randomMixSubject ? "Random Mix" : actSectionDisplayName(widget.section)} — Q${_qIndex + 1}/${_questions.length}'),
-            leading: IconButton(icon: const Icon(Icons.close), onPressed: _confirmExit),
+            leading: _exitLockedByBet
+                ? Tooltip(
+                    message: 'Exit locked — bet match, $_questionsUntilExitUnlocked question${_questionsUntilExitUnlocked == 1 ? '' : 's'} left',
+                    child: IconButton(
+                      icon: Badge(
+                        label: Text('$_questionsUntilExitUnlocked'),
+                        child: const Icon(Icons.lock_outline),
+                      ),
+                      onPressed: _confirmExit,
+                    ),
+                  )
+                : IconButton(icon: const Icon(Icons.close), onPressed: _confirmExit),
             actions: [
               // Voice on/off — same toggle as Practice/Full Exam, in case the
               // user doesn't want questions/feedback read aloud during a match.

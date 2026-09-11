@@ -21,6 +21,28 @@ class ActLeaderboardService {
   static const _groupKey = 'act_lb_group_id_v1';
   static const _tickInterval = Duration(minutes: 5);
 
+  // ── Bet consequence: "drop one leaderboard tier for this session" ─────────
+  // Deliberately kept in-memory only (not persisted) — "this session" means
+  // it should clear the moment the app is actually restarted, which a
+  // static field does for free.
+  static bool _tierDropActiveThisSession = false;
+
+  static void activateTierDropForSession() {
+    _tierDropActiveThisSession = true;
+  }
+
+  static bool get isTierDropActiveThisSession => _tierDropActiveThisSession;
+
+  static const _tierOrder = ['gold', 'silver', 'bronze', 'top5', 'top10', ''];
+
+  /// Steps a badge tier one rung down (gold -> silver -> bronze -> top5 ->
+  /// top10 -> none), used to apply a lost "ranking_reset" bet.
+  static String _dropOneTier(String badge) {
+    final i = _tierOrder.indexOf(badge);
+    if (i < 0 || i >= _tierOrder.length - 1) return '';
+    return _tierOrder[i + 1];
+  }
+
   // ── US name pool (hard to detect as fake) ────────────────────────────────
   static const _firstNames = [
     'Aidan', 'Alexandra', 'Andrew', 'Ashley', 'Aurora',
@@ -202,6 +224,7 @@ class ActLeaderboardService {
   static Future<List<LeaderboardEntry>> buildMergedBoard(
     List<Map<String, dynamic>> realRows, {
     bool sync = true,
+    bool suppressOwnBadge = false,
   }) async {
     final simulated = await getSimulatedEntries(sync: sync);
     final combined = <Map<String, dynamic>>[
@@ -218,6 +241,7 @@ class ActLeaderboardService {
 
     return List.generate(combined.length, (i) {
       final e = combined[i];
+      final isReal = e['isReal'] as bool? ?? false;
       String badge = '';
       if (i == 0) badge = 'gold';
       else if (i == 1) badge = 'silver';
@@ -225,13 +249,19 @@ class ActLeaderboardService {
       else if (i < 5) badge = 'top5';
       else if (i < 10) badge = 'top10';
 
+      // Bet consequences that affect only the real user's own row.
+      if (isReal) {
+        if (_tierDropActiveThisSession) badge = _dropOneTier(badge);
+        if (suppressOwnBadge) badge = '';
+      }
+
       return LeaderboardEntry(
         rank: i + 1,
         displayName: e['displayName'] as String,
         compositeScore: (e['compositeScore'] as num).toDouble(),
         accuracy: (e['accuracy'] as num).toDouble(),
         attempts: e['attempts'] as int? ?? 0,
-        isRealUser: e['isReal'] as bool? ?? false,
+        isRealUser: isReal,
         badge: badge,
         updatedAt: DateTime.now(),
       );

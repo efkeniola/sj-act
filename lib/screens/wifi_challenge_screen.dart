@@ -139,6 +139,7 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
   // Bet-loss access pause (WiFi Challenge only — kept separate from Online
   // Challenge's own pause so the two never interfere with each other).
   DateTime? _accessPauseUntil;
+  bool _practiceRequired = false;
 
   @override
   void initState() {
@@ -150,7 +151,8 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
 
   Future<void> _checkAccessPause() async {
     final until = await UserProfileService.getWifiAccessPauseUntil();
-    if (mounted) setState(() => _accessPauseUntil = until);
+    final practiceRequired = await UserProfileService.getRequiresPracticeBeforeWifiChallenge();
+    if (mounted) setState(() { _accessPauseUntil = until; _practiceRequired = practiceRequired; });
   }
 
   Future<void> _loadName() async {
@@ -178,6 +180,16 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
   // ── Host ──────────────────────────────────────────────────────────────────
   Future<void> _startHosting() async {
     if (_accessPauseUntil != null && _accessPauseUntil!.isAfter(DateTime.now())) return;
+    if (_practiceRequired) {
+      _showSnack('You lost a bet that requires finishing one practice set before your next WiFi Challenge.');
+      return;
+    }
+    // Guard against starting a host session while already scanning for or
+    // connected to someone else's room as a guest.
+    if (_scanning || _joined || _hostSocket != null) {
+      _showSnack('You\'re already joining a room. Leave it first.');
+      return;
+    }
     if (!await _isNetworkReady()) {
       _showSnack('WiFi or Hotspot is off. Turn it on and make sure it\'s connected, then try again.');
       return;
@@ -234,6 +246,15 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
   // ── Guest ─────────────────────────────────────────────────────────────────
   Future<void> _scanRooms() async {
     if (_accessPauseUntil != null && _accessPauseUntil!.isAfter(DateTime.now())) return;
+    if (_practiceRequired) {
+      _showSnack('You lost a bet that requires finishing one practice set before your next WiFi Challenge.');
+      return;
+    }
+    // Guard against scanning/joining while already hosting a room.
+    if (_hosting) {
+      _showSnack('You\'re hosting a room. Stop hosting first.');
+      return;
+    }
     if (!await _isNetworkReady()) {
       _showSnack('WiFi or Hotspot is off. Turn it on (or join the host\'s Hotspot), then try again.');
       return;
@@ -247,7 +268,21 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
         final addresses = service.addresses;
         final port = service.port;
         if (addresses == null || addresses.isEmpty || port == null) return;
-        final hostText = (service.txt?['host'] as String?) ?? service.name ?? 'Host';
+        // `service.txt` values from the `nsd` package are raw UTF-8 bytes
+        // (Uint8List), never a String directly. Casting straight to
+        // `String?` throws a TypeError inside this listener callback for
+        // every single discovered service — which silently aborts this
+        // callback before `_foundRooms` ever gets updated, so Join always
+        // showed "no rooms found" even with a live host nearby. Decode the
+        // bytes properly, and fall back to `service.name` (which already
+        // carries "SJACT-<hostName>") if TXT data isn't present at all.
+        String hostText;
+        try {
+          final rawTxt = service.txt?['host'];
+          hostText = rawTxt != null ? utf8.decode(rawTxt) : (service.name ?? 'Host');
+        } catch (_) {
+          hostText = service.name ?? 'Host';
+        }
         final host = addresses.first.address;
         final id = '$host:$port';
         if (found.contains(id)) return;
@@ -754,8 +789,13 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
       // or a disconnect-triggered quit always skips this block entirely, so
       // nothing is ever won, lost, or docked from a match that wasn't
       // actually finished by both players.
-      final name = await UserProfileService.getDisplayName() ?? _myName;
-      await DatabaseService.instance.upsertLeaderboardEntry(name, myScore, myAcc);
+      // Only write once a real display name is known — a placeholder
+      // fallback (like the transient "Me" used before a name loads)
+      // leaves a permanent duplicate "you" row on the leaderboard.
+      final name = await UserProfileService.getDisplayName();
+      if (name != null) {
+        await DatabaseService.instance.upsertLeaderboardEntry(name, myScore, myAcc);
+      }
       final tie = (myScore - oppScore).abs() < 0.1;
       final iWon = myScore > oppScore;
       await _applyBetConsequence(iWon, tie);
@@ -777,13 +817,27 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
   Future<void> _applyBetConsequence(bool iWon, bool tie) async {
     final bet = _proposedBet;
     if (bet == null || !_betAccepted || tie) return;
-    // Same policy as Online Challenge: only the "access hours" bet type has
-    // real, enforceable teeth in this app (there's no ranking/badge ledger
-    // to actually dock points from) — the rest are flavor/bragging rights
-    // shown on the result screen only.
-    if (bet['type'] == 'access' && !iWon) {
-      final hours = int.tryParse((bet['value'] ?? '').toString()) ?? 2;
-      await UserProfileService.setWifiAccessPauseUntil(DateTime.now().add(Duration(hours: hours)));
+    final type = bet['type'];
+    final value = (bet['value'] ?? '').toString();
+    switch (type) {
+      case 'access':
+        if (!iWon) {
+          final hours = int.tryParse(value) ?? 2;
+          await UserProfileService.setWifiAccessPauseUntil(DateTime.now().add(Duration(hours: hours)));
+        }
+        break;
+      case 'ranking':
+        {
+          // Zero-sum: winner gains the points, loser loses the same amount.
+          final pts = int.tryParse(value) ?? 1;
+          await UserProfileService.addBetRankingPoints(iWon ? pts : -pts);
+        }
+        break;
+      case 'badge':
+        if (!iWon) {
+          await UserProfileService.setChallengerBadgeSuspendedFor(const Duration(hours: 24));
+        }
+        break;
     }
   }
 
@@ -811,7 +865,27 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
     });
   }
 
+  // True for the final 3 questions of a match with an accepted bet riding
+  // on it — the window where leaving is locked out so a bet can't be
+  // dodged by quitting just before losing.
+  bool get _exitLockedByBet =>
+      _betAccepted && _proposedBet != null && (_matchQuestions.length - _qIndex) <= 3;
+
+  int get _questionsUntilExitUnlocked =>
+      (_matchQuestions.length - _qIndex).clamp(0, 3);
+
   Future<void> _confirmExitMatch() async {
+    // Same protection as Online Challenge: once a bet has been accepted
+    // and the match is down to its final 3 questions, "Leave Match" is
+    // locked out. Leaving cancels the bet outright (see the dialog copy
+    // below) which otherwise makes it a free way to dodge a losing bet
+    // right before the match actually ends.
+    if (_exitLockedByBet) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('You have a bet riding on this match — you can\'t leave in the final $_questionsUntilExitUnlocked question${_questionsUntilExitUnlocked == 1 ? '' : 's'}.'),
+      ));
+      return;
+    }
     final leave = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -877,6 +951,20 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
           controller: _tab,
           indicatorColor: Colors.white,
           tabs: const [Tab(text: 'HOST'), Tab(text: 'JOIN')],
+          // Prevent hosting and joining at the same time. Without this, a
+          // person who tapped "Start Hosting" (room live, waiting for a
+          // guest) could still swipe/tap over to JOIN and connect out to
+          // someone else's room while their own was still open — two live
+          // sockets fighting over the same _handleMsg routing at once.
+          onTap: (index) {
+            if (_hosting && index == 1) {
+              _tab.index = 0;
+              _showSnack('You\'re hosting a room. Stop hosting first if you want to join someone else\'s.');
+            } else if ((_scanning || _joined || _hostSocket != null) && index == 0) {
+              _tab.index = 1;
+              _showSnack('You\'re joining a room. Leave it first if you want to host your own.');
+            }
+          },
         ),
       ),
       body: paused
@@ -1295,7 +1383,18 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
         child: Scaffold(
           appBar: AppBar(
             title: Text('${_matchMixed ? "Random Mix" : actSectionDisplayName(_matchSection)} — Q${_qIndex + 1}/${_matchQuestions.length}'),
-            leading: IconButton(icon: const Icon(Icons.close), onPressed: _confirmExitMatch),
+            leading: _exitLockedByBet
+                ? Tooltip(
+                    message: 'Leave locked — bet match, $_questionsUntilExitUnlocked question${_questionsUntilExitUnlocked == 1 ? '' : 's'} left',
+                    child: IconButton(
+                      icon: Badge(
+                        label: Text('$_questionsUntilExitUnlocked'),
+                        child: const Icon(Icons.lock_outline),
+                      ),
+                      onPressed: _confirmExitMatch,
+                    ),
+                  )
+                : IconButton(icon: const Icon(Icons.close), onPressed: _confirmExitMatch),
             actions: [
               IconButton(
                 icon: Icon(_voiceEnabled ? Icons.volume_up : Icons.volume_off_outlined,

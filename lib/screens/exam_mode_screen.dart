@@ -1032,7 +1032,10 @@ class _FullExamSessionState extends State<_FullExamSession> {
 
     // Save if autoSave
     if (widget.settings.autoSave) {
-      final name = widget.settings.studentName ?? await UserProfileService.getDisplayName() ?? 'Student';
+      // Only write to the leaderboard once a real name is known — a
+      // placeholder fallback here leaves a permanent duplicate "you" row
+      // in the leaderboard table (see section_screen.dart for details).
+      final name = widget.settings.studentName ?? await UserProfileService.getDisplayName();
       for (final entry in sectionResults.entries) {
         final attempt = ExamAttempt(
           id: '${DateTime.now().toIso8601String()}-${entry.key.name}',
@@ -1042,9 +1045,12 @@ class _FullExamSessionState extends State<_FullExamSession> {
           setNumber: 1,
           section: entry.key,
           results: entry.value,
+          isFullExam: true,
         );
         await DatabaseService.instance.saveAttempt(attempt);
-        await DatabaseService.instance.upsertLeaderboardEntry(name, composite.toDouble(), composite / 36);
+        if (name != null) {
+          await DatabaseService.instance.upsertLeaderboardEntry(name, composite.toDouble(), composite / 36);
+        }
       }
     }
 

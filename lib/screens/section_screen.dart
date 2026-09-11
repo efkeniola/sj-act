@@ -257,10 +257,19 @@ class _SectionScreenState extends State<SectionScreen> {
       results: results,
     );
     await DatabaseService.instance.saveAttempt(attempt);
-    // Update leaderboard
-    final name = await UserProfileService.getDisplayName() ?? 'Student';
-    final score = attempt.actScaledScore;
-    await DatabaseService.instance.upsertLeaderboardEntry(name, score, attempt.accuracy);
+    // Update leaderboard — only once the real display name is known.
+    // Falling back to a placeholder like 'Student' here would create a
+    // second, permanent leaderboard row that never goes away and shows
+    // up as a duplicate "you" entry forever (this used to happen).
+    final name = await UserProfileService.getDisplayName();
+    if (name != null) {
+      final score = attempt.actScaledScore;
+      await DatabaseService.instance.upsertLeaderboardEntry(name, score, attempt.accuracy);
+    }
+    // Completing this practice section satisfies a "finish one practice
+    // set before your next Online/WiFi Challenge" bet consequence, if one
+    // is currently active.
+    await UserProfileService.clearAllPracticeRequiredGates();
 
     if (!mounted) return;
     Navigator.pushReplacement(

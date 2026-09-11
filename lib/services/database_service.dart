@@ -22,8 +22,17 @@ class DatabaseService {
     final path = join(await getDatabasesPath(), 'sj_act.db');
     return openDatabase(
       path,
-      version: 1,
+      version: 2,
       onCreate: (db, _) async => _createTables(db),
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          // Adds the flag that distinguishes a completed full-exam attempt
+          // from a quick single-section practice attempt, so score
+          // predictions can be restricted to real full-exam results only.
+          await db.execute(
+              'ALTER TABLE attempts ADD COLUMN isFullExam INTEGER DEFAULT 0');
+        }
+      },
     );
   }
 
@@ -35,7 +44,8 @@ class DatabaseService {
         completedAt TEXT,
         setNumber INTEGER,
         section TEXT,
-        resultsJson TEXT
+        resultsJson TEXT,
+        isFullExam INTEGER DEFAULT 0
       )
     ''');
     await db.execute('''
@@ -113,6 +123,7 @@ class DatabaseService {
       'setNumber': attempt.setNumber,
       'section': attempt.section != null ? actSectionToString(attempt.section!) : null,
       'resultsJson': jsonEncode(attempt.results.map((r) => r.toMap()).toList()),
+      'isFullExam': attempt.isFullExam ? 1 : 0,
     };
     if (kIsWeb) {
       await _webUpsert('attempts', 'id', attempt.id, map);
@@ -141,6 +152,7 @@ class DatabaseService {
         setNumber: r['setNumber'] as int? ?? 1,
         section: r['section'] != null ? actSectionFromString(r['section'] as String) : null,
         results: results,
+        isFullExam: (r['isFullExam'] as int? ?? 0) == 1,
       );
     }).toList();
   }
@@ -230,6 +242,32 @@ class DatabaseService {
     if (kIsWeb) return _webGetAll('leaderboard_sim');
     final db = await database;
     return db.query('leaderboard_sim', orderBy: 'compositeScore DESC');
+  }
+
+  Future<void> deleteLeaderboardEntry(String displayName) async {
+    if (kIsWeb) {
+      await _webDelete('leaderboard_sim', 'displayName', displayName);
+      return;
+    }
+    final db = await database;
+    await db.delete('leaderboard_sim', where: 'displayName = ?', whereArgs: [displayName]);
+  }
+
+  /// One-time cleanup for installs that already picked up a stray
+  /// placeholder leaderboard row (from before writes were guarded on a
+  /// real display name being known — e.g. 'Student', 'You', 'Me'). Any
+  /// such row that isn't the person's actual current name is deleted, so
+  /// the leaderboard stops showing a permanent duplicate "you" entry.
+  Future<void> pruneStalePlaceholderLeaderboardEntries(String? realDisplayName) async {
+    const placeholders = {'Student', 'You', 'Me'};
+    final rows = await getLeaderboardEntries();
+    for (final row in rows) {
+      final rowName = row['displayName'] as String?;
+      if (rowName == null) continue;
+      if (placeholders.contains(rowName) && rowName != realDisplayName) {
+        await deleteLeaderboardEntry(rowName);
+      }
+    }
   }
 
   // ── Timetable ─────────────────────────────────────────────────────────────

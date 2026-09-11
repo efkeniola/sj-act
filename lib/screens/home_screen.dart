@@ -65,9 +65,14 @@ class _HomeScreenState extends State<HomeScreen> {
       _targetScore = targetScore;
       _totalAttempts = attempts.length;
       _overallAccuracy = totalQ == 0 ? 0 : totalC / totalQ;
-      final bestAttempt = attempts.isEmpty
+      // Score prediction must only ever be based on a completed FULL exam —
+      // a quick single-section practice session isn't a valid basis for an
+      // ACT composite prediction, so it's excluded here even though it
+      // still counts toward the Sessions/Accuracy stats above.
+      final fullExamAttempts = attempts.where((a) => a.isFullExam).toList();
+      final bestAttempt = fullExamAttempts.isEmpty
           ? null
-          : attempts
+          : fullExamAttempts
               .reduce((a, b) => a.actScaledScore > b.actScaledScore ? a : b);
       _bestComposite = bestAttempt?.actScaledScore ?? 0;
       _loading = false;
