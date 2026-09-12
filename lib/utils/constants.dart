@@ -43,12 +43,12 @@ class AppConstants {
   // everyone regardless of activation status, so they can be tested without
   // needing an activation code yet. Standard activation is NOT affected.
   // Set this back to `false` once testing is done to re-lock them.
-  static const bool tempUnlockWifiAndOnlineChallenge = true;
+  static const bool tempUnlockWifiAndOnlineChallenge = false;
 
   // Same idea, just for the Leaderboard screen — unlocked for testing
   // regardless of Standard activation. Set back to `false` to re-lock it
   // behind Standard activation once testing is done.
-  static const bool tempUnlockLeaderboard = true;
+  static const bool tempUnlockLeaderboard = false;
 
   // ── Store / Support ──────────────────────────────────
   static const String codeStoreUrl = "https://smartjamb.com/act-app/";
