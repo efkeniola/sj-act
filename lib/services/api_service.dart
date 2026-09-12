@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:http/http.dart' as http;
 
 import '../utils/constants.dart';
@@ -55,10 +56,8 @@ class ApiService {
         'The server took too long to respond. Check your connection and try again.',
         wasTimeout: true,
       );
-    } catch (_) {
-      return ApiResult.fail(
-        'Could not reach the server. Please check your internet connection.',
-      );
+    } catch (e) {
+      return ApiResult.fail(_describeError(e));
     }
   }
 
@@ -81,10 +80,8 @@ class ApiService {
         'The server took too long to respond. Check your connection and try again.',
         wasTimeout: true,
       );
-    } catch (_) {
-      return ApiResult.fail(
-        'Could not reach the server. Please check your internet connection.',
-      );
+    } catch (e) {
+      return ApiResult.fail(_describeError(e));
     }
   }
 
@@ -94,5 +91,29 @@ class ApiService {
     } catch (_) {
       return null;
     }
+  }
+
+  /// Maps a raised exception to an accurate, distinct message instead of
+  /// always blaming "check your internet connection" — that used to be a
+  /// blanket `catch (_)` covering every possible failure (a real dropped
+  /// connection, a TLS/certificate error, a malformed/non-JSON server
+  /// response, a bad URL, etc.), so someone whose internet was genuinely
+  /// fine but hit e.g. a certificate or server-response problem would be
+  /// told to check their connection — the one thing that wasn't actually
+  /// wrong, with no way to tell what really failed.
+  static String _describeError(Object e) {
+    if (e is SocketException) {
+      return 'Could not reach the server. Please check your internet connection.';
+    }
+    if (e is HandshakeException) {
+      return 'Secure connection to the server failed (certificate/TLS error). '
+          'This isn\'t a connectivity issue — please try again or contact support if it persists.';
+    }
+    if (e is FormatException) {
+      return 'The server sent back an unexpected response. This usually isn\'t '
+          'an internet connection problem — please try again or contact support if it persists.';
+    }
+    return 'Something went wrong reaching the server (${e.runtimeType}). '
+        'This isn\'t necessarily an internet connection problem — please try again or contact support if it persists.';
   }
 }
