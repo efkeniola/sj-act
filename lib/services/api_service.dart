@@ -105,6 +105,15 @@ class ApiService {
     if (e is SocketException) {
       return 'Could not reach the server. Please check your internet connection.';
     }
+    if (e is http.ClientException) {
+      // package:http v1.x wraps most low-level connection failures (DNS
+      // resolution failure, connection refused/reset, no route to host)
+      // as ClientException rather than a raw SocketException — this is
+      // almost always a genuine reachability problem (the device/network
+      // can't establish a connection to the server at all), so it gets
+      // the same message as SocketException rather than the generic one.
+      return 'Could not reach the server. Please check your internet connection.\n(${e.message})';
+    }
     if (e is HandshakeException) {
       return 'Secure connection to the server failed (certificate/TLS error). '
           'This isn\'t a connectivity issue — please try again or contact support if it persists.';
