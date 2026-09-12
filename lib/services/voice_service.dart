@@ -217,12 +217,23 @@ class VoiceService {
         pauseFor: const Duration(seconds: 3),
         localeId: 'en_US',
         cancelOnError: true,
-        listenMode: stt.ListenMode.confirmation,
-        // Prefer the device's on-device/offline recognizer so answering by
-        // voice keeps working without an internet connection. On devices
-        // where on-device recognition isn't available, the platform
-        // transparently falls back to the online recognizer.
-        onDevice: true,
+        listenMode: stt.ListenMode.search,
+        // ListenMode.search maps to Android's web-search language model,
+        // which is tuned for short single-word/short-phrase utterances —
+        // a much better match for "A"/"B"/"C"/"D" than
+        // ListenMode.confirmation, which is tuned for full yes/no-style
+        // sentences and was mis-hearing or dropping single letters.
+        // NOTE: this used to force onDevice: true ("prefer the on-device
+        // recognizer so voice answers keep working offline"). In practice
+        // that's not a safe assumption — plenty of Android phones (older
+        // devices, and many outside the US) don't have an offline speech
+        // model downloaded at all, and forcing on-device recognition on
+        // those devices doesn't reliably fall back online the way the
+        // plugin's docs imply. Instead it just fails to produce any
+        // result — which looks exactly like "the mic lights up but saying
+        // 'A' never selects anything." Letting the platform pick
+        // (online-preferred, falling back to on-device where available)
+        // is far more reliable across real devices.
       );
     } catch (e) {
       hardTimeout.cancel();

@@ -114,6 +114,13 @@ class _ExamModeScreenState extends State<ExamModeScreen> {
           await ExamSettingsService.setStudentName(name);
           await ExamSettingsService.setTargetScore(target);
           await ExamSettingsService.markProfileSetupDone();
+          // Keep this in sync with the app-wide profile name used by every
+          // other mode — only fill it in if it isn't already set, so this
+          // doesn't silently overwrite a name the person set deliberately
+          // in Settings.
+          if (await UserProfileService.getDisplayName() == null) {
+            await UserProfileService.setDisplayName(name);
+          }
           if (mounted) {
             setState(() => _settings = _settings!.copyWith(studentName: name, targetScore: target));
             _showExamSetup();
@@ -1032,10 +1039,25 @@ class _FullExamSessionState extends State<_FullExamSession> {
 
     // Save if autoSave
     if (widget.settings.autoSave) {
-      // Only write to the leaderboard once a real name is known — a
-      // placeholder fallback here leaves a permanent duplicate "you" row
-      // in the leaderboard table (see section_screen.dart for details).
-      final name = widget.settings.studentName ?? await UserProfileService.getDisplayName();
+      // Full Exam mode used to have its own separate "studentName" (typed
+      // once in the Profile Setup dialog below) that took priority over
+      // the app-wide profile display name used by every other mode
+      // (section practice, Online/WiFi Challenge). Since those are almost
+      // never the exact same string, this created a *second*, permanent
+      // leaderboard row every time a full exam was played — showing up as
+      // your own name appearing twice. The app-wide display name is now
+      // always the canonical source; studentName is only a fallback for
+      // when no profile name has been set at all.
+      final examName = widget.settings.studentName;
+      final canonicalName = await UserProfileService.getDisplayName();
+      final name = canonicalName ?? examName;
+      if (canonicalName != null && examName != null && examName != canonicalName) {
+        // We now know for certain the old exam-only name and the
+        // canonical profile name are the same person — retire the stale
+        // duplicate row immediately instead of leaving it to show up
+        // again as a second leaderboard entry.
+        await DatabaseService.instance.deleteLeaderboardEntry(examName);
+      }
       for (final entry in sectionResults.entries) {
         final attempt = ExamAttempt(
           id: '${DateTime.now().toIso8601String()}-${entry.key.name}',

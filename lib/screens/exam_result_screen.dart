@@ -233,7 +233,55 @@ class ExamResultScreen extends StatelessWidget {
               isDark: isDark,
             ),
 
-            const SizedBox(height: 32),
+            const SizedBox(height: 24),
+
+            // ── Question-by-Question Review ──────────────────────────────────
+            // This was missing entirely in "reveal at end" mode — with
+            // per-question feedback turned off during the exam itself,
+            // this is the only place a player ever gets to see which
+            // questions they got wrong and why. Grouped by section since a
+            // full exam spans several subjects, each with its own question
+            // set, unlike the single-section practice review.
+            const Text('Question-by-Question Review',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 10),
+            ...sectionScores.keys.map((section) {
+              final questions = sectionQuestions[section] ?? [];
+              final results = sectionResults[section] ?? [];
+              if (questions.isEmpty) return const SizedBox.shrink();
+              final correctCount = results.where((r) => r.isCorrect).length;
+              return Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                decoration: BoxDecoration(
+                  color: isDark ? ActColors.darkCard : Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                      color: isDark ? ActColors.darkBorder : ActColors.lightBorder),
+                ),
+                child: Theme(
+                  data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+                  child: ExpansionTile(
+                    tilePadding: const EdgeInsets.symmetric(horizontal: 14),
+                    childrenPadding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+                    title: Text(actSectionDisplayName(section),
+                        style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+                    subtitle: Text('$correctCount / ${questions.length} correct',
+                        style: TextStyle(fontSize: 11, color: ActColors.midGray)),
+                    children: List.generate(questions.length, (i) {
+                      if (i >= results.length) return const SizedBox.shrink();
+                      return _ExamReviewItem(
+                        index: i + 1,
+                        question: questions[i],
+                        result: results[i],
+                        isDark: isDark,
+                      );
+                    }),
+                  ),
+                ),
+              );
+            }),
+
+            const SizedBox(height: 8),
 
             // Actions
             SizedBox(
@@ -1022,4 +1070,88 @@ class _ScoreRangeRow extends StatelessWidget {
           Expanded(child: Text(label, style: const TextStyle(fontSize: 12))),
         ]),
       );
+}
+
+/// Per-question review row for the full exam results screen — same pattern
+/// as section_screen.dart's practice review (_ReviewItem in
+/// result_screen.dart), duplicated here since that one is private to its
+/// file. Collapsed by default; tap to expand the question text,
+/// explanation, and topic tip.
+class _ExamReviewItem extends StatefulWidget {
+  final int index;
+  final ActQuestion question;
+  final QuestionResult result;
+  final bool isDark;
+  const _ExamReviewItem({required this.index, required this.question, required this.result, required this.isDark});
+
+  @override
+  State<_ExamReviewItem> createState() => _ExamReviewItemState();
+}
+
+class _ExamReviewItemState extends State<_ExamReviewItem> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final isCorrect = widget.result.isCorrect;
+    final color = isCorrect ? ActColors.success : ActColors.danger;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: widget.isDark ? ActColors.darkCard : Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withOpacity(0.20)),
+      ),
+      child: Column(
+        children: [
+          ListTile(
+            dense: true,
+            leading: CircleAvatar(
+              radius: 14,
+              backgroundColor: color.withOpacity(0.12),
+              child: Icon(
+                isCorrect ? Icons.check : Icons.close,
+                size: 14,
+                color: color,
+              ),
+            ),
+            title: Text(
+              'Q${widget.index}: ${widget.question.skillArea}',
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+            ),
+            subtitle: Text(
+              isCorrect
+                  ? 'Correct (${widget.result.givenAnswer})'
+                  : 'Your answer: ${widget.result.givenAnswer.isEmpty ? "—" : widget.result.givenAnswer}  |  Correct: ${widget.question.correctAnswer}',
+              style: TextStyle(fontSize: 11, color: color),
+            ),
+            trailing: IconButton(
+              icon: Icon(_expanded ? Icons.expand_less : Icons.expand_more, size: 18),
+              onPressed: () => setState(() => _expanded = !_expanded),
+            ),
+          ),
+          if (_expanded)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(widget.question.questionText,
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, height: 1.4)),
+                  const SizedBox(height: 8),
+                  Text('Explanation: ${widget.question.explanation}',
+                      style: TextStyle(fontSize: 12, color: ActColors.midGray, height: 1.4)),
+                  if (widget.question.topicTip != null) ...[
+                    const SizedBox(height: 6),
+                    Text('Tip: ${widget.question.topicTip}',
+                        style: TextStyle(fontSize: 12, color: ActColors.accent, height: 1.4)),
+                  ],
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 }
