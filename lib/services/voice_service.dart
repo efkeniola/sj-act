@@ -136,10 +136,17 @@ class VoiceService {
   /// user *why* it failed (permission blocked, no speech engine on the
   /// device, nothing understood, etc.) instead of always showing the same
   /// generic "couldn't detect an answer" message.
+  ///
+  /// [onPartial] fires on every partial (in-progress) transcript, purely so
+  /// the UI can show live "heard so far: ..." feedback — this is what makes
+  /// it possible to actually tell whether the mic is picking up audio at
+  /// all versus picking it up but failing to parse it as a letter, instead
+  /// of both cases looking identical ("nothing happened").
   Future<void> listenForAnswer({
     required void Function(String letter) onResult,
     void Function(String reason)? onUnrecognised,
-    Duration timeout = const Duration(seconds: 8),
+    void Function(String partialText)? onPartial,
+    Duration timeout = const Duration(seconds: 10),
   }) async {
     // STT not available on web (flutlab.io)
     if (kIsWeb) {
@@ -168,13 +175,19 @@ class VoiceService {
     // permission. onError always writes into _lastSttError so any failure —
     // whether during this initialize() call or during the listen() session
     // right after — is available to explain a failed attempt.
+    //
+    // Re-initialising on every single call (not just when !_sttReady) used
+    // to leave a stale/wedged recognizer session in place on some devices
+    // after a prior failed attempt — that's what could make it look like
+    // "the mic lights up but literally nothing happens" on a retry. Forcing
+    // a full stop + fresh initialize before every listen makes each attempt
+    // independent of whatever state the previous one left behind.
     _lastSttError = null;
-    if (!_sttReady) {
-      _sttReady = await _stt.initialize(
-        onError: (e) { _isListening = false; _lastSttError = e.errorMsg; },
-        onStatus: (s) { if (s == 'done' || s == 'notListening') _isListening = false; },
-      );
-    }
+    try { await _stt.stop(); } catch (_) {}
+    _sttReady = await _stt.initialize(
+      onError: (e) { _isListening = false; _lastSttError = e.errorMsg; },
+      onStatus: (s) { if (s == 'done' || s == 'notListening') _isListening = false; },
+    );
     if (!_sttReady) {
       onUnrecognised?.call(
         'Speech recognition is not available on this device'
@@ -185,38 +198,64 @@ class VoiceService {
     }
 
     _isListening = true;
+    bool resultFired = false;
 
-    // Set a hard timeout in case the STT callback never fires
-    final hardTimeout = Timer(timeout + const Duration(seconds: 2), () {
-      if (_isListening) {
-        _isListening = false;
-        _stt.stop();
-        onUnrecognised?.call(_lastSttError ?? 'Didn\'t catch that — no speech was detected. Try again.');
+    void finish(String? letter, String? reason, String heardRaw) {
+      if (resultFired) return;
+      resultFired = true;
+      _isListening = false;
+      _stt.stop();
+      if (letter != null) {
+        onResult(letter);
+      } else if (reason != null) {
+        onUnrecognised?.call(reason);
+      } else if (heardRaw.isEmpty) {
+        onUnrecognised?.call('Didn\'t catch that — no speech was detected. Try again.');
+      } else {
+        onUnrecognised?.call('Heard "$heardRaw" — please say just "A", "B", "C", or "D".');
       }
+    }
+
+    // Set a hard timeout in case the STT callback never fires at all —
+    // this is the difference between "the mic icon stays yellow forever
+    // with no feedback" and actually telling the person something failed.
+    final hardTimeout = Timer(timeout + const Duration(seconds: 3), () {
+      finish(null, _lastSttError ?? 'Didn\'t catch that — no speech was detected. Try again.', '');
     });
 
     try {
-      bool resultFired = false;
       await _stt.listen(
         onResult: (result) {
-          if (!result.finalResult || resultFired) return;
-          resultFired = true;
-          hardTimeout.cancel();
-          _isListening = false;
           final spoken = result.recognizedWords.toLowerCase().trim();
+          onPartial?.call(result.recognizedWords);
+
+          // Accept a confident match on a PARTIAL result immediately,
+          // rather than only ever acting on result.finalResult. Several
+          // Android speech-recognition services reliably deliver a clean
+          // partial transcript within a second or two but then either
+          // delay the "final" flag well past what feels responsive, or —
+          // on some devices/firmware — never mark a result final at all
+          // for a single-word utterance, relying entirely on the pauseFor
+          // silence timeout to end the session. Waiting only for
+          // finalResult made those sessions look completely dead even
+          // though the word "A" had already been heard and understood.
           final detected = _detectOptionFromSpeech(spoken);
           if (detected != null) {
-            onResult(detected);
-          } else if (spoken.isEmpty) {
-            onUnrecognised?.call('Didn\'t catch that — no speech was detected. Try again.');
-          } else {
-            onUnrecognised?.call('Heard "$spoken" — please say just "A", "B", "C", or "D".');
+            hardTimeout.cancel();
+            finish(detected, null, spoken);
+            return;
+          }
+
+          if (result.finalResult) {
+            hardTimeout.cancel();
+            finish(null, null, spoken);
           }
         },
         listenFor: timeout,
         pauseFor: const Duration(seconds: 3),
         localeId: 'en_US',
         cancelOnError: true,
+        partialResults: true,
         listenMode: stt.ListenMode.search,
         // ListenMode.search maps to Android's web-search language model,
         // which is tuned for short single-word/short-phrase utterances —
@@ -237,8 +276,7 @@ class VoiceService {
       );
     } catch (e) {
       hardTimeout.cancel();
-      _isListening = false;
-      onUnrecognised?.call('Voice recognition failed to start. Please try again.');
+      finish(null, 'Voice recognition failed to start. Please try again.', '');
     }
   }
 

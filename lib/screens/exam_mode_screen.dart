@@ -786,6 +786,7 @@ class _FullExamSessionState extends State<_FullExamSession> {
   bool _voiceEnabled = false;
   bool _micEnabled = false;
   bool _listening = false;
+  String _listeningHeard = '';
 
   late int _secondsLeft;
   late int _totalSectionSeconds;
@@ -828,15 +829,39 @@ class _FullExamSessionState extends State<_FullExamSession> {
 
   void _startListening() async {
     if (!_micEnabled || _listening) return;
-    setState(() => _listening = true);
+    setState(() { _listening = true; _listeningHeard = ''; });
     await VoiceService.instance.listenForAnswer(
+      onPartial: (text) {
+        if (mounted) setState(() => _listeningHeard = text);
+      },
       onResult: (letter) {
         if (mounted) setState(() { _listening = false; _selectAnswer(letter); });
       },
       onUnrecognised: (reason) {
         if (mounted) setState(() => _listening = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(reason)));
+        _showVoiceIssue(reason);
       },
+    );
+  }
+
+  /// A blocking dialog rather than a SnackBar — a SnackBar auto-dismisses in
+  /// a few seconds and is easy to miss, which made voice failures look like
+  /// nothing happened at all instead of showing why.
+  void _showVoiceIssue(String reason) {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Voice answer'),
+        content: Text(reason),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK')),
+          TextButton(
+            onPressed: () { Navigator.pop(context); _startListening(); },
+            child: const Text('Try Again'),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1429,6 +1454,40 @@ class _FullExamSessionState extends State<_FullExamSession> {
                   childWhenDragging: const SizedBox.shrink(),
                   child: _buildCalculator(),
                   onDragEnd: (_) {},
+                ),
+              ),
+            // Live "listening" banner — makes it obvious the mic is
+            // actually capturing audio (and what it's hearing) rather than
+            // leaving the person staring at a mic icon with no idea
+            // whether anything is happening.
+            if (_listening)
+              Positioned(
+                top: 8, left: 16, right: 16,
+                child: Material(
+                  color: Colors.transparent,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: ActColors.accent,
+                      borderRadius: BorderRadius.circular(10),
+                      boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 8)],
+                    ),
+                    child: Row(
+                      children: [
+                        const SizedBox(
+                          width: 16, height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black87),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            _listeningHeard.isEmpty ? 'Listening… say "A", "B", "C", or "D"' : 'Heard: "$_listeningHeard"',
+                            style: const TextStyle(color: Colors.black87, fontWeight: FontWeight.w700, fontSize: 12.5),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               ),
           ],

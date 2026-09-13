@@ -51,6 +51,7 @@ class _SectionScreenState extends State<SectionScreen> {
   bool _voiceEnabled = false;
   bool _micEnabled = false;
   bool _listening = false;
+  String _listeningHeard = '';
   bool _paused = false;
   bool _calcVisible = false;
 
@@ -170,15 +171,44 @@ class _SectionScreenState extends State<SectionScreen> {
 
   void _startListening() async {
     if (!_micEnabled || _listening) return;
-    setState(() => _listening = true);
+    setState(() { _listening = true; _listeningHeard = ''; });
     await VoiceService.instance.listenForAnswer(
+      onPartial: (text) {
+        // Live "heard so far" text while listening, so it's immediately
+        // obvious whether the mic is picking up audio at all (vs. picking
+        // it up but failing to parse it as a letter) — those two failure
+        // modes used to look completely identical from the outside.
+        if (mounted) setState(() => _listeningHeard = text);
+      },
       onResult: (letter) {
         if (mounted) setState(() { _listening = false; _selectAnswer(letter); });
       },
       onUnrecognised: (reason) {
         if (mounted) setState(() => _listening = false);
-        _showSnack(reason);
+        _showVoiceIssue(reason);
       },
+    );
+  }
+
+  /// A blocking dialog rather than a SnackBar — a SnackBar auto-dismisses
+  /// in a few seconds and is easy to miss entirely if you're not looking
+  /// at the bottom of the screen right at that moment, which made voice
+  /// failures look like nothing happened at all instead of showing why.
+  void _showVoiceIssue(String reason) {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Voice answer'),
+        content: Text(reason),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK')),
+          TextButton(
+            onPressed: () { Navigator.pop(context); _startListening(); },
+            child: const Text('Try Again'),
+          ),
+        ],
+      ),
     );
   }
 
@@ -330,11 +360,6 @@ class _SectionScreenState extends State<SectionScreen> {
         ],
       ),
     );
-  }
-
-  void _showSnack(String msg) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   String _formatTime(int seconds) {
@@ -511,6 +536,40 @@ class _SectionScreenState extends State<SectionScreen> {
                         display: _calcDisplay,
                         onInput: (token) => setState(() => _calcInput(token)),
                         onClose: () => setState(() => _calcVisible = false),
+                      ),
+                    ),
+                  // Live "listening" banner — makes it obvious the mic is
+                  // actually capturing audio (and what it's hearing) rather
+                  // than leaving the person staring at a mic icon with no
+                  // idea whether anything is happening.
+                  if (_listening)
+                    Positioned(
+                      top: 8, left: 16, right: 16,
+                      child: Material(
+                        color: Colors.transparent,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          decoration: BoxDecoration(
+                            color: ActColors.accent,
+                            borderRadius: BorderRadius.circular(10),
+                            boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 8)],
+                          ),
+                          child: Row(
+                            children: [
+                              const SizedBox(
+                                width: 16, height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black87),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  _listeningHeard.isEmpty ? 'Listening… say "A", "B", "C", or "D"' : 'Heard: "$_listeningHeard"',
+                                  style: const TextStyle(color: Colors.black87, fontWeight: FontWeight.w700, fontSize: 12.5),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                     ),
                 ],
