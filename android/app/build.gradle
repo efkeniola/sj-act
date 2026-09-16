@@ -38,7 +38,7 @@ android {
     defaultConfig {
         applicationId "com.sj_act"
         // minSdk 23 — covers 99.5%+ of active Android devices as of 2026.
-        // speech_to_text requires minSdk >= 21; permission_handler >= 23.
+        // (minSdk 23 kept as the app baseline.)
         minSdk 23
         targetSdk 36
         versionCode flutter.versionCode

@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../data/motivation_data.dart';
+import '../data/questions_data.dart';
 import '../models/models.dart';
 import '../services/activation_service.dart';
+import '../services/daily_usage_service.dart';
 import '../services/database_service.dart';
 import '../services/exam_settings_service.dart';
+import '../services/free_trial_service.dart';
 import '../services/user_profile_service.dart';
 import '../utils/constants.dart';
 import '../utils/theme.dart';
@@ -40,6 +43,13 @@ class _HomeScreenState extends State<HomeScreen> {
   double _bestComposite = 0;
   int _targetScore = 28;
 
+  // Free trial / free-plan state
+  bool _trialStarted = false;
+  bool _trialActive = false;
+  Duration _trialRemaining = Duration.zero;
+  bool _onlineTrialLeft = false;
+  bool _wifiTrialLeft = false;
+
   @override
   void initState() {
     super.initState();
@@ -51,6 +61,12 @@ class _HomeScreenState extends State<HomeScreen> {
     final statuses = await ActivationService.getAllStatuses();
     final targetScore = await ExamSettingsService.getTargetScore();
     final attempts = await DatabaseService.instance.getAllAttempts();
+    final trialStarted = await FreeTrialService.hasStartedTrial();
+    final trialActive = await FreeTrialService.isTrialActive();
+    final trialRemaining = await FreeTrialService.trialTimeRemaining();
+    final onlineTrialLeft = await FreeTrialService.canUseOnlineTrial();
+    final wifiTrialLeft = await FreeTrialService.canUseWifiHostTrial() ||
+        await FreeTrialService.canUseWifiJoinTrial();
     final totalQ = attempts.fold<int>(0, (p, a) => p + a.totalCount);
     final totalC = attempts.fold<int>(0, (p, a) => p + a.correctCount);
     if (!mounted) return;
@@ -65,6 +81,11 @@ class _HomeScreenState extends State<HomeScreen> {
       _targetScore = targetScore;
       _totalAttempts = attempts.length;
       _overallAccuracy = totalQ == 0 ? 0 : totalC / totalQ;
+      _trialStarted = trialStarted;
+      _trialActive = trialActive;
+      _trialRemaining = trialRemaining;
+      _onlineTrialLeft = onlineTrialLeft;
+      _wifiTrialLeft = wifiTrialLeft;
       // Score prediction must only ever be based on a completed FULL exam —
       // a quick single-section practice session isn't a valid basis for an
       // ACT composite prediction, so it's excluded here even though it
@@ -77,6 +98,17 @@ class _HomeScreenState extends State<HomeScreen> {
       _bestComposite = bestAttempt?.actScaledScore ?? 0;
       _loading = false;
     });
+  }
+
+  Future<void> _startFreeTrial() async {
+    final started = await FreeTrialService.startTrial();
+    if (!mounted) return;
+    if (started) {
+      await _load();
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Free trial started! You have 24 hours of extra access.'),
+      ));
+    }
   }
 
   Future<void> _openStore() async {
@@ -222,6 +254,15 @@ class _HomeScreenState extends State<HomeScreen> {
                           _load();
                         }),
 
+                      // ── Free trial banner ────────────────────────────────────
+                      if (!_standardActive)
+                        _FreeTrialBanner(
+                          started: _trialStarted,
+                          active: _trialActive,
+                          remaining: _trialRemaining,
+                          onStart: _startFreeTrial,
+                        ),
+
                       // ═══════════════════════════════════════════════════════
                       // FULL EXAM MODE — first, most prominent card
                       // ═══════════════════════════════════════════════════════
@@ -295,12 +336,17 @@ class _HomeScreenState extends State<HomeScreen> {
                             context,
                             MaterialPageRoute(
                                 builder: (_) => const CalculatorScreen())),
-                        onLeaderboard: () => (_standardActive || AppConstants.tempUnlockLeaderboard)
-                            ? Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                    builder: (_) => const LeaderboardScreen()))
-                            : _promptActivation(),
+                        onLeaderboard: () async {
+                          final unlocked = await FreeTrialService.canAccessLeaderboard(standardActive: _standardActive)
+                              || AppConstants.tempUnlockLeaderboard;
+                          if (!mounted) return;
+                          if (unlocked) {
+                            Navigator.push(context,
+                                MaterialPageRoute(builder: (_) => const LeaderboardScreen()));
+                          } else {
+                            _promptActivation();
+                          }
+                        },
                       ),
 
                       // ── Premium Challenges ───────────────────────────────────
@@ -316,19 +362,16 @@ class _HomeScreenState extends State<HomeScreen> {
                           const Color(0xFF0D47A1),
                           const Color(0xFF1976D2)
                         ],
-                        isLocked: !_onlineActive,
-                        // Standard gets 1 free/day
+                        isLocked: !_onlineActive && !_standardActive &&
+                            !(_trialActive && _onlineTrialLeft),
+                        // Standard gets 1 free/day; free trial gets one
+                        // host-only 20-question match.
                         freeInfo: _standardActive && !_onlineActive
                             ? '1 free match per day'
-                            : null,
-                        onTap: () => _onlineActive || _standardActive
-                            ? Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                    builder: (_) =>
-                                        const OnlineChallengeScreen()))
-                            : _promptActivation(
-                                cat: AppConstants.catOnlineChallenge),
+                            : (!_standardActive && !_onlineActive && _trialActive && _onlineTrialLeft)
+                                ? 'Free trial: 1 host-only match (20Q)'
+                                : null,
+                        onTap: _onOnlineChallengeTap,
                       ),
                       const SizedBox(height: 12),
                       _PremiumChallengeCard(
@@ -342,19 +385,17 @@ class _HomeScreenState extends State<HomeScreen> {
                           const Color(0xFF1B5E20),
                           const Color(0xFF388E3C)
                         ],
-                        isLocked: !_wifiActive,
-                        // Standard gets 2 free/day but limited setup
+                        isLocked: !_wifiActive && !_standardActive &&
+                            !(_trialActive && _wifiTrialLeft),
+                        // Standard gets 2 free/day (2nd needs a gate
+                        // question answered correctly); free trial gets
+                        // one host + one join match, each 20 questions.
                         freeInfo: _standardActive && !_wifiActive
-                            ? '2 free matches/day · 30q min'
-                            : null,
-                        onTap: () => _wifiActive || _standardActive
-                            ? Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                    builder: (_) => WifiChallengeScreen(
-                                        fullAccess: _wifiActive)))
-                            : _promptActivation(
-                                cat: AppConstants.catWifiChallenge),
+                            ? '2 free matches/day · 2nd needs a quick question'
+                            : (!_standardActive && !_wifiActive && _trialActive && _wifiTrialLeft)
+                                ? 'Free trial: 1 host + 1 join match (20Q each)'
+                                : null,
+                        onTap: _onWifiChallengeTap,
                       ),
 
                       const SizedBox(height: 32),
@@ -364,9 +405,33 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _goToSection(ActSection section) {
+  void _goToSection(ActSection section) async {
+    int setNumber = 1;
+    if (_standardActive) {
+      final chosen = await _pickSetDialog();
+      if (chosen == null) return; // cancelled
+      setNumber = chosen;
+    }
+    if (!mounted) return;
     Navigator.push(context,
-        MaterialPageRoute(builder: (_) => SectionScreen(section: section)));
+        MaterialPageRoute(builder: (_) => SectionScreen(section: section, setNumber: setNumber)));
+  }
+
+  Future<int?> _pickSetDialog() {
+    return showDialog<int>(
+      context: context,
+      builder: (_) => SimpleDialog(
+        title: const Text('Choose a Question Set'),
+        children: [1, 2, 3].map((n) => SimpleDialogOption(
+          onPressed: () => Navigator.pop(context, n),
+          child: Row(children: [
+            Icon(Icons.quiz_outlined, size: 18, color: ActColors.primary),
+            const SizedBox(width: 10),
+            Text('Set $n', style: const TextStyle(fontWeight: FontWeight.w600)),
+          ]),
+        )).toList(),
+      ),
+    );
   }
 
   void _promptActivation({String? cat}) async {
@@ -376,6 +441,146 @@ class _HomeScreenState extends State<HomeScreen> {
             builder: (_) => ActivationScreen(
                 initialCategory: cat ?? AppConstants.catStandard)));
     _load();
+  }
+
+  // ── Online Challenge access control ─────────────────────────────────────
+  Future<void> _onOnlineChallengeTap() async {
+    if (_onlineActive) {
+      _pushOnlineChallenge(trialMode: false);
+      return;
+    }
+    if (_standardActive) {
+      final remaining = await DailyUsageService.onlineRemainingToday();
+      if (remaining > 0) {
+        await DailyUsageService.recordOnlineUsage();
+        _pushOnlineChallenge(trialMode: false);
+      } else if (mounted) {
+        _showLimitDialog(
+          'Online Challenge',
+          "You've used today's free Online Challenge match. Come back tomorrow, or activate Online Challenge for unlimited access.",
+          cat: AppConstants.catOnlineChallenge,
+        );
+      }
+      return;
+    }
+    if (await FreeTrialService.canUseOnlineTrial()) {
+      _pushOnlineChallenge(trialMode: true);
+      return;
+    }
+    _promptActivation(cat: AppConstants.catOnlineChallenge);
+  }
+
+  void _pushOnlineChallenge({required bool trialMode}) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => OnlineChallengeScreen(trialMode: trialMode)),
+    ).then((_) => _load());
+  }
+
+  // ── WiFi Challenge access control ───────────────────────────────────────
+  Future<void> _onWifiChallengeTap() async {
+    if (_wifiActive) {
+      _pushWifiChallenge(fullAccess: true, trialMode: false);
+      return;
+    }
+    if (_standardActive) {
+      final used = await DailyUsageService.getWifiUsedToday();
+      if (used < 1) {
+        await DailyUsageService.recordWifiUsage();
+        _pushWifiChallenge(fullAccess: false, trialMode: false);
+        return;
+      }
+      if (used >= DailyUsageService.freeWifiPerDay) {
+        if (mounted) {
+          _showLimitDialog(
+            'WiFi Challenge',
+            "You've used both free WiFi Challenge matches today. Come back tomorrow, or activate WiFi Challenge for unlimited access.",
+            cat: AppConstants.catWifiChallenge,
+          );
+        }
+        return;
+      }
+      if (await DailyUsageService.isWifiSecondMatchBlockedForToday()) {
+        if (mounted) {
+          _showLimitDialog(
+            'WiFi Challenge',
+            "Today's retry on the bonus question is used up. Come back tomorrow, or activate WiFi Challenge for unlimited access.",
+            cat: AppConstants.catWifiChallenge,
+          );
+        }
+        return;
+      }
+      // 1 match used, 1 left — answer a quick gate question to unlock it.
+      final correct = await _askGateQuestion();
+      if (!mounted) return;
+      final unlocked = await DailyUsageService.recordWifiGateAnswer(correct: correct);
+      if (unlocked) {
+        await DailyUsageService.recordWifiUsage();
+        _pushWifiChallenge(fullAccess: false, trialMode: false);
+      } else if (await DailyUsageService.isWifiSecondMatchBlockedForToday()) {
+        if (mounted) {
+          _showLimitDialog(
+            'WiFi Challenge',
+            "Not quite right, and today's retry is used up. Come back tomorrow, or activate WiFi Challenge for unlimited access.",
+            cat: AppConstants.catWifiChallenge,
+          );
+        }
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Not quite — but you get one more try. Tap WiFi Challenge again.'),
+        ));
+      }
+      return;
+    }
+    // Free plan: only the trial can unlock WiFi Challenge (host or join).
+    if (await FreeTrialService.canUseWifiHostTrial() || await FreeTrialService.canUseWifiJoinTrial()) {
+      _pushWifiChallenge(fullAccess: false, trialMode: true);
+      return;
+    }
+    _promptActivation(cat: AppConstants.catWifiChallenge);
+  }
+
+  void _pushWifiChallenge({required bool fullAccess, required bool trialMode}) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => WifiChallengeScreen(fullAccess: fullAccess, trialMode: trialMode)),
+    ).then((_) => _load());
+  }
+
+  void _showLimitDialog(String title, String message, {String? cat}) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('$title limit reached'),
+        content: Text(message),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Not now')),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _promptActivation(cat: cat);
+            },
+            child: const Text('Activate'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// A random multiple-choice question used to gate the Standard package's
+  /// 2nd free WiFi Challenge match of the day. Always drawn from Set 1 so
+  /// it never depends on Standard-locked content.
+  Future<bool> _askGateQuestion() async {
+    final pool = questionsForRandomMix(setNumber: 1);
+    if (pool.isEmpty) return true; // fail-open — nothing to gate with
+    final shuffled = List<ActQuestion>.from(pool)..shuffle();
+    final q = shuffled.first;
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _GateQuestionDialog(question: q),
+    );
+    return result ?? false;
   }
 }
 
@@ -775,6 +980,153 @@ class _ActivationBanner extends StatelessWidget {
           ]),
         ),
       );
+}
+
+// ── Free 24-hour trial banner ────────────────────────────────────────────────
+// Shown only to non-Standard users. Three states: not started yet (CTA to
+// start), active (countdown), or started-and-expired (quiet, no CTA — the
+// trial is one-time only, so there's nothing left to offer here).
+class _FreeTrialBanner extends StatelessWidget {
+  final bool started;
+  final bool active;
+  final Duration remaining;
+  final VoidCallback onStart;
+  const _FreeTrialBanner({
+    required this.started,
+    required this.active,
+    required this.remaining,
+    required this.onStart,
+  });
+
+  String _fmtRemaining(Duration d) {
+    final h = d.inHours;
+    final m = d.inMinutes % 60;
+    return '${h}h ${m}m';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (started && !active) {
+      // Trial used and expired — nothing actionable to show.
+      return const SizedBox.shrink();
+    }
+    final color = active ? const Color(0xFF2E7D32) : ActColors.primary;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Row(children: [
+        Icon(active ? Icons.timer_outlined : Icons.card_giftcard_outlined, color: color, size: 20),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                active ? 'Free Trial Active' : 'Try a Free 24-Hour Trial',
+                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: color),
+              ),
+              Text(
+                active
+                    ? '${_fmtRemaining(remaining)} left · Unlimited Set 1 exam, Online & WiFi trial matches, and Leaderboard access.'
+                    : 'Unlimited Set 1 full exam, one Online Challenge match, one WiFi Challenge match, and Leaderboard access — free for 24 hours.',
+                style: TextStyle(fontSize: 11, color: ActColors.midGray, height: 1.4),
+              ),
+            ],
+          ),
+        ),
+        if (!active)
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: color,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              minimumSize: Size.zero,
+            ),
+            onPressed: onStart,
+            child: const Text('Start', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12)),
+          ),
+      ]),
+    );
+  }
+}
+
+// ── WiFi Challenge daily gate question dialog ────────────────────────────────
+// Answering correctly unlocks the Standard package's 2nd free WiFi
+// Challenge match of the day; a wrong answer has a 50/50 chance of one
+// immediate retry (handled by the caller via DailyUsageService).
+class _GateQuestionDialog extends StatefulWidget {
+  final ActQuestion question;
+  const _GateQuestionDialog({required this.question});
+
+  @override
+  State<_GateQuestionDialog> createState() => _GateQuestionDialogState();
+}
+
+class _GateQuestionDialogState extends State<_GateQuestionDialog> {
+  String? _selected;
+  bool _answered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final q = widget.question;
+    const letters = ['A', 'B', 'C', 'D'];
+    return AlertDialog(
+      title: const Text('Quick Question'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Answer this to unlock your 2nd free WiFi Challenge match today.',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 10),
+          Text(q.questionText, style: const TextStyle(fontSize: 14)),
+          const SizedBox(height: 12),
+          ...List.generate(q.options.length.clamp(0, 4), (i) {
+            final letter = letters[i];
+            final isCorrect = letter == q.correctAnswer;
+            final isSelected = _selected == letter;
+            Color? tileColor;
+            if (_answered && isSelected) {
+              tileColor = isCorrect
+                  ? (isDark ? Colors.green.withOpacity(0.25) : Colors.green.withOpacity(0.15))
+                  : (isDark ? Colors.red.withOpacity(0.25) : Colors.red.withOpacity(0.15));
+            }
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: InkWell(
+                onTap: _answered ? null : () async {
+                  setState(() { _selected = letter; _answered = true; });
+                  await Future.delayed(const Duration(milliseconds: 700));
+                  if (mounted) Navigator.of(context).pop(isCorrect);
+                },
+                borderRadius: BorderRadius.circular(8),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: tileColor,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: isDark ? ActColors.darkBorder : ActColors.lightBorder),
+                  ),
+                  child: Row(children: [
+                    Text('$letter.', style: const TextStyle(fontWeight: FontWeight.w700)),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text(q.options[i], style: const TextStyle(fontSize: 13))),
+                  ]),
+                ),
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
 }
 
 class _SectionCard extends StatelessWidget {

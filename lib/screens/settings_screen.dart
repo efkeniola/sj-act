@@ -16,7 +16,6 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _darkMode = false;
   bool _voiceEnabled = false;
-  bool _sttEnabled = false;
   String _displayName = '';
   final _nameCtrl = TextEditingController();
   bool _nameSaving = false;
@@ -32,14 +31,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _load() async {
     final name   = await UserProfileService.getDisplayName();
     final voice  = await VoiceService.instance.isTtsEnabled();
-    final stt    = await VoiceService.instance.isSttEnabled();
     final exam   = await ExamSettingsService.loadAll();
     final answerReveal = await ExamSettingsService.getAnswerReveal();
     if (!mounted) return;
     setState(() {
       _darkMode     = darkModeNotifier.value;
       _voiceEnabled = voice;
-      _sttEnabled   = stt;
       _displayName  = name ?? '';
       _nameCtrl.text = _displayName;
       _examSettings  = exam;
@@ -259,14 +256,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
           trailing: Switch(value: _voiceEnabled, activeColor: ActColors.primary,
             onChanged: (v) async { await VoiceService.instance.setTtsEnabled(v);
               setState(() => _voiceEnabled = v); }),
-        ),
-        _SettingsTile(
-          icon: Icons.mic_outlined, title: 'Speak Your Answer',
-          subtitle: 'Say "A", "B", "C", or "D" to answer hands-free. Needs microphone permission.',
-          isDark: isDark,
-          trailing: Switch(value: _sttEnabled, activeColor: ActColors.primary,
-            onChanged: (v) async { await VoiceService.instance.setSttEnabled(v);
-              setState(() => _sttEnabled = v); }),
         ),
 
         // ── Keyboard Shortcuts ───────────────────────────────────────────────

@@ -8,6 +8,7 @@ import '../data/questions_data.dart';
 import '../models/models.dart';
 import '../multiplayer/fake_online_challenge.dart';
 import '../services/database_service.dart';
+import '../services/free_trial_service.dart';
 import '../services/leaderboard_service.dart';
 import '../services/user_profile_service.dart';
 import '../services/voice_service.dart';
@@ -21,7 +22,11 @@ String _formatOnlineTimerLabel(int seconds) =>
 
 // ── Setup screen ──────────────────────────────────────────────────────────────
 class OnlineChallengeScreen extends StatefulWidget {
-  const OnlineChallengeScreen({super.key});
+  // Free-trial add-on: host-only, capped at 20 questions, usable once.
+  // Defaults to false so every other caller (Standard/Online activation)
+  // is unaffected.
+  final bool trialMode;
+  const OnlineChallengeScreen({super.key, this.trialMode = false});
 
   @override
   State<OnlineChallengeScreen> createState() => _OnlineChallengeScreenState();
@@ -31,7 +36,7 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
   OnlineChallengeRegion _region = OnlineChallengeRegion.usa;
   ActSection _section = ActSection.math;
   bool _randomMixSubject = false;
-  int _questionCount = 30;
+  late int _questionCount;
   // null = no per-question timer (unlimited thinking time). Host can set
   // anywhere from 15s up to a 3-minute (180s) cap — English/Reading passages
   // need more room than a quick Math question.
@@ -113,6 +118,7 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
   @override
   void initState() {
     super.initState();
+    _questionCount = widget.trialMode ? FreeTrialService.trialChallengeQuestionCount : 30;
     _checkAccessPause();
   }
 
@@ -137,6 +143,7 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
   void _startSearch() {
     if (_accessPauseUntil != null && _accessPauseUntil!.isAfter(DateTime.now())) return;
     if (_practiceRequired) return;
+    if (widget.trialMode) FreeTrialService.markOnlineTrialUsed();
     setState(() {
       _searching = true;
       _statusMsg = 'Connecting...';
@@ -434,16 +441,34 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
             _ActivityBanner(isDark: isDark),
             const SizedBox(height: 12),
 
-            // Browse active rooms
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: (_setupLocked || blocked) ? null : _openActiveRooms,
-                icon: const Icon(Icons.groups_outlined, size: 18),
-                label: const Text('Browse Active Rooms', style: TextStyle(fontWeight: FontWeight.w700)),
-                style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 13)),
+            // Browse active rooms — host-only during the free trial, so
+            // joining someone else's room isn't available here.
+            if (!widget.trialMode)
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: (_setupLocked || blocked) ? null : _openActiveRooms,
+                  icon: const Icon(Icons.groups_outlined, size: 18),
+                  label: const Text('Browse Active Rooms', style: TextStyle(fontWeight: FontWeight.w700)),
+                  style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 13)),
+                ),
+              )
+            else
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: ActColors.primary.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(children: [
+                  Icon(Icons.info_outline, size: 16, color: ActColors.primary),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text(
+                    'Free trial: host a match of ${FreeTrialService.trialChallengeQuestionCount} questions. Joining is available with Online Challenge activation.',
+                    style: TextStyle(fontSize: 11.5, color: ActColors.primary),
+                  )),
+                ]),
               ),
-            ),
             const SizedBox(height: 16),
 
             if (paused) ...[
@@ -502,9 +527,9 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
             const SizedBox(height: 6),
             _Label('Questions'),
             IgnorePointer(
-              ignoring: _setupLocked,
+              ignoring: _setupLocked || widget.trialMode,
               child: Opacity(
-                opacity: _setupLocked ? 0.5 : 1,
+                opacity: (_setupLocked || widget.trialMode) ? 0.5 : 1,
                 child: Wrap(spacing: 8, children: [10, 20, 30, 40].map((n) => ChoiceChip(
                   label: Text('$n'),
                   selected: _questionCount == n,
@@ -514,6 +539,12 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
                 )).toList()),
               ),
             ),
+            if (widget.trialMode)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text('Free trial matches are fixed at ${FreeTrialService.trialChallengeQuestionCount} questions.',
+                    style: TextStyle(fontSize: 11, color: ActColors.midGray)),
+              ),
             const SizedBox(height: 6),
             _Label('Time per Question (host sets this)'),
             IgnorePointer(

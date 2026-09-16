@@ -43,19 +43,6 @@
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<false/>
 
-	<!-- ── Microphone ────────────────────────────────────────────────────
-	     Required by:
-	       - speech_to_text: spoken-answer detection ("say A, B, C, or D")
-	       - record: audio capture for WiFi Challenge voice (if enabled)
-	     Apple rejects apps that list this key without using the mic. -->
-	<key>NSMicrophoneUsageDescription</key>
-	<string>SJ ACT uses your microphone so you can speak your answer aloud ("A", "B", "C", or "D") during practice sessions, and for voice chat during WiFi Challenge.</string>
-
-	<!-- ── Speech recognition ───────────────────────────────────────────
-	     Required by speech_to_text for on-device + cloud STT on iOS. -->
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>SJ ACT uses speech recognition to detect your spoken answer choice during practice. All recognition happens on-device when possible.</string>
-
 	<!-- ── Local network + Bonjour (WiFi Challenge NSD) ─────────────────
 	     Required for NSD peer-to-peer discovery on iOS 14+.
 	     Without these, the system will block all multicast/Bonjour

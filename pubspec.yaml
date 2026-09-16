@@ -43,12 +43,6 @@ dependencies:
   # Voice reading (TTS) — reads questions aloud, works fully offline
   flutter_tts: ^4.2.0
 
-  # Spoken-answer detection (STT) — detects "A/B/C/D" from the microphone
-  speech_to_text: ^7.0.0
-
-  # Runtime permissions (microphone for STT, nearby WiFi for NSD)
-  permission_handler: ^11.3.1
-
   # package info for about screen
   package_info_plus: ^8.1.1
 

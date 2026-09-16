@@ -6,11 +6,15 @@ import 'package:flutter/services.dart';
 
 import '../data/questions_data.dart';
 import '../models/models.dart';
+import '../services/activation_service.dart';
 import '../services/database_service.dart';
+import '../services/free_trial_service.dart';
 import '../services/voice_service.dart';
 import '../services/exam_settings_service.dart';
 import '../services/user_profile_service.dart';
+import '../utils/constants.dart';
 import '../utils/theme.dart';
+import 'activation_screen.dart';
 import 'exam_result_screen.dart';
 
 // ── ACT raw-score-to-scale conversion tables (official lookup) ────────────────
@@ -84,6 +88,9 @@ class ExamModeScreen extends StatefulWidget {
 class _ExamModeScreenState extends State<ExamModeScreen> {
   bool _loading = true;
   ExamSettings? _settings;
+  bool _standardActive = false;
+  bool _trialActive = false;
+  int _selectedSet = 1;
 
   @override
   void initState() {
@@ -94,8 +101,16 @@ class _ExamModeScreenState extends State<ExamModeScreen> {
   Future<void> _init() async {
     final settings = await ExamSettingsService.loadAll();
     final profileDone = await ExamSettingsService.isProfileSetupDone();
+    final statuses = await ActivationService.getAllStatuses();
+    final standardActive = statuses[AppConstants.catStandard]?.isFullyActive ?? false;
+    final trialActive = await FreeTrialService.isTrialActive();
     if (!mounted) return;
-    setState(() { _settings = settings; _loading = false; });
+    setState(() {
+      _settings = settings;
+      _standardActive = standardActive;
+      _trialActive = trialActive;
+      _loading = false;
+    });
 
     if (!profileDone) {
       // Show profile setup first
@@ -136,7 +151,26 @@ class _ExamModeScreenState extends State<ExamModeScreen> {
       barrierDismissible: false,
       builder: (_) => _ExamSetupDialog(
         settings: _settings!,
+        standardActive: _standardActive,
+        trialActive: _trialActive,
+        initialSet: _selectedSet,
+        onSetChanged: (v) => _selectedSet = v,
         onStart: (settings) async {
+          // Free-plan gate: Set 1 is one attempt ever (unlimited while an
+          // active free trial is running); Sets 2/3 always require
+          // Standard activation. This is re-checked right here — not just
+          // reflected in which chips are tappable — so it can't be
+          // bypassed by a stale dialog state.
+          final allowed = await FreeTrialService.canStartFullExam(
+            _selectedSet,
+            standardActive: _standardActive,
+          );
+          if (!allowed) {
+            if (!mounted) return;
+            Navigator.of(context).pop(); // close setup dialog
+            _showFullExamLockedDialog();
+            return;
+          }
           await ExamSettingsService.saveAll(settings);
           setState(() => _settings = settings);
           if (mounted) _launchExam(settings);
@@ -153,11 +187,42 @@ class _ExamModeScreenState extends State<ExamModeScreen> {
     );
   }
 
+  /// Shown when the free-plan user has already used their one lifetime
+  /// Set 1 attempt (and no trial is active) or picked a locked set.
+  void _showFullExamLockedDialog() {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Full Practice Exam locked'),
+        content: Text(_selectedSet != 1
+            ? 'Set $_selectedSet needs Standard activation. Set 1 is free.'
+            : 'Your one free Set 1 full exam has already been used. '
+                'Start a free 24-hour trial for unlimited Set 1 access, or activate for full access to every set.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.of(context).pop();
+              await Navigator.push(context, MaterialPageRoute(
+                builder: (_) => const ActivationScreen(),
+              ));
+              if (mounted) Navigator.of(context).pop(); // leave Exam Mode; home screen reloads on return
+            },
+            child: const Text('Activate'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _launchExam(ExamSettings settings) {
     // Build section list
     final sections = <_ExamSection>[];
     if (settings.includeEnglish) {
-      final qs = questionsForSection(ActSection.english);
+      final qs = questionsForSection(ActSection.english, setNumber: _selectedSet);
       if (qs.isNotEmpty) {
         sections.add(_ExamSection(
           section: ActSection.english,
@@ -167,7 +232,7 @@ class _ExamModeScreenState extends State<ExamModeScreen> {
       }
     }
     if (settings.includeMath) {
-      final qs = questionsForSection(ActSection.math);
+      final qs = questionsForSection(ActSection.math, setNumber: _selectedSet);
       if (qs.isNotEmpty) {
         sections.add(_ExamSection(
           section: ActSection.math,
@@ -177,7 +242,7 @@ class _ExamModeScreenState extends State<ExamModeScreen> {
       }
     }
     if (settings.includeReading) {
-      final qs = questionsForSection(ActSection.reading);
+      final qs = questionsForSection(ActSection.reading, setNumber: _selectedSet);
       if (qs.isNotEmpty) {
         sections.add(_ExamSection(
           section: ActSection.reading,
@@ -187,7 +252,7 @@ class _ExamModeScreenState extends State<ExamModeScreen> {
       }
     }
     if (settings.includeScience) {
-      final qs = questionsForSection(ActSection.science);
+      final qs = questionsForSection(ActSection.science, setNumber: _selectedSet);
       if (qs.isNotEmpty) {
         sections.add(_ExamSection(
           section: ActSection.science,
@@ -205,7 +270,12 @@ class _ExamModeScreenState extends State<ExamModeScreen> {
     }
 
     Navigator.pushReplacement(context, MaterialPageRoute(
-      builder: (_) => _FullExamSession(sections: sections, settings: settings),
+      builder: (_) => _FullExamSession(
+        sections: sections,
+        settings: settings,
+        setNumber: _selectedSet,
+        standardActive: _standardActive,
+      ),
     ));
   }
 
@@ -344,7 +414,19 @@ class _ExamSetupDialog extends StatefulWidget {
   final ExamSettings settings;
   final void Function(ExamSettings) onStart;
   final VoidCallback onCancel;
-  const _ExamSetupDialog({required this.settings, required this.onStart, required this.onCancel});
+  final bool standardActive;
+  final bool trialActive;
+  final int initialSet;
+  final void Function(int) onSetChanged;
+  const _ExamSetupDialog({
+    required this.settings,
+    required this.onStart,
+    required this.onCancel,
+    required this.standardActive,
+    required this.trialActive,
+    required this.initialSet,
+    required this.onSetChanged,
+  });
 
   @override
   State<_ExamSetupDialog> createState() => _ExamSetupDialogState();
@@ -352,11 +434,69 @@ class _ExamSetupDialog extends StatefulWidget {
 
 class _ExamSetupDialogState extends State<_ExamSetupDialog> {
   late ExamSettings _s;
+  late int _selectedSet;
 
   @override
   void initState() {
     super.initState();
     _s = widget.settings;
+    _selectedSet = widget.initialSet;
+  }
+
+  Widget _setPicker() {
+    Widget chip(int setNum) {
+      final locked = setNum != 1 && !widget.standardActive;
+      final selected = _selectedSet == setNum;
+      return Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: ChoiceChip(
+          label: Row(mainAxisSize: MainAxisSize.min, children: [
+            if (locked) const Padding(
+              padding: EdgeInsets.only(right: 4),
+              child: Icon(Icons.lock_outline, size: 13),
+            ),
+            Text('Set $setNum'),
+          ]),
+          selected: selected,
+          selectedColor: ActColors.primary,
+          labelStyle: TextStyle(
+            fontWeight: FontWeight.w700,
+            color: selected ? Colors.white : (locked ? ActColors.midGray : null),
+          ),
+          onSelected: (_) {
+            if (locked) {
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text('Set $setNum needs Standard activation. Set 1 is free.'),
+              ));
+              return;
+            }
+            setState(() => _selectedSet = setNum);
+            widget.onSetChanged(setNum);
+          },
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Question Set', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+          const SizedBox(height: 6),
+          Row(children: [chip(1), chip(2), chip(3)]),
+          if (!widget.standardActive)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                widget.trialActive
+                    ? 'Free trial: unlimited Set 1 practice until your trial ends.'
+                    : 'Free plan: one Set 1 full exam. Activate for every set, unlimited.',
+                style: TextStyle(fontSize: 11, color: ActColors.midGray),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   String _fmtTime(int minutes) {
@@ -527,6 +667,8 @@ class _ExamSetupDialogState extends State<_ExamSetupDialog> {
                       _SummaryChip(label: '${_fmtTime(_s.totalMinutes)} Total', icon: Icons.timer_outlined),
                     ]),
                     const SizedBox(height: 16),
+
+                    _setPicker(),
 
                     // English
                     _sectionRow(
@@ -769,7 +911,14 @@ class _OptionRow extends StatelessWidget {
 class _FullExamSession extends StatefulWidget {
   final List<_ExamSection> sections;
   final ExamSettings settings;
-  const _FullExamSession({required this.sections, required this.settings});
+  final int setNumber;
+  final bool standardActive;
+  const _FullExamSession({
+    required this.sections,
+    required this.settings,
+    this.setNumber = 1,
+    this.standardActive = false,
+  });
 
   @override
   State<_FullExamSession> createState() => _FullExamSessionState();
@@ -784,9 +933,6 @@ class _FullExamSessionState extends State<_FullExamSession> {
   bool _paused = false;
   bool _calcVisible = false;
   bool _voiceEnabled = false;
-  bool _micEnabled = false;
-  bool _listening = false;
-  String _listeningHeard = '';
 
   late int _secondsLeft;
   late int _totalSectionSeconds;
@@ -811,8 +957,7 @@ class _FullExamSessionState extends State<_FullExamSession> {
   Future<void> _initVoice() async {
     await VoiceService.instance.init();
     final tts = await VoiceService.instance.isTtsEnabled();
-    final mic = await VoiceService.instance.isSttEnabled();
-    if (mounted) setState(() { _voiceEnabled = tts; _micEnabled = mic; });
+    if (mounted) setState(() { _voiceEnabled = tts; });
     if (tts) _readCurrentQuestion();
   }
 
@@ -827,58 +972,12 @@ class _FullExamSessionState extends State<_FullExamSession> {
     );
   }
 
-  void _startListening() async {
-    if (!_micEnabled || _listening) return;
-    setState(() { _listening = true; _listeningHeard = ''; });
-    await VoiceService.instance.listenForAnswer(
-      onPartial: (text) {
-        if (mounted) setState(() => _listeningHeard = text);
-      },
-      onResult: (letter) {
-        if (mounted) setState(() { _listening = false; _selectAnswer(letter); });
-      },
-      onUnrecognised: (reason) {
-        if (mounted) setState(() => _listening = false);
-        _showVoiceIssue(reason);
-      },
-    );
-  }
-
-  /// A blocking dialog rather than a SnackBar — a SnackBar auto-dismisses in
-  /// a few seconds and is easy to miss, which made voice failures look like
-  /// nothing happened at all instead of showing why.
-  void _showVoiceIssue(String reason) {
-    if (!mounted) return;
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Voice answer'),
-        content: Text(reason),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK')),
-          TextButton(
-            onPressed: () { Navigator.pop(context); _startListening(); },
-            child: const Text('Try Again'),
-          ),
-        ],
-      ),
-    );
-  }
-
   void _toggleVoice() async {
     final newVal = !_voiceEnabled;
     await VoiceService.instance.setTtsEnabled(newVal);
     setState(() => _voiceEnabled = newVal);
     if (newVal) _readCurrentQuestion();
     else VoiceService.instance.stopReading();
-  }
-
-  void _toggleMic() async {
-    final newVal = !_micEnabled;
-    await VoiceService.instance.setSttEnabled(newVal);
-    setState(() => _micEnabled = newVal);
-    // Enabling the mic should start listening immediately in the same tap.
-    if (newVal) _startListening();
   }
 
   void _startSection() {
@@ -1089,7 +1188,7 @@ class _FullExamSessionState extends State<_FullExamSession> {
           startedAt: DateTime.now().subtract(Duration(seconds: widget.sections
               .firstWhere((s) => s.section == entry.key).timeLimitSeconds)),
           completedAt: DateTime.now(),
-          setNumber: 1,
+          setNumber: widget.setNumber,
           section: entry.key,
           results: entry.value,
           isFullExam: true,
@@ -1101,6 +1200,11 @@ class _FullExamSessionState extends State<_FullExamSession> {
       }
     }
 
+    if (!mounted) return;
+    // Consume the free-plan's one-time Set 1 attempt now that the exam has
+    // actually been completed (a no-op for standard-activated users, other
+    // sets, or attempts taken during an active free trial).
+    await FreeTrialService.recordFullExamCompleted(widget.setNumber, standardActive: widget.standardActive);
     if (!mounted) return;
     Navigator.pushReplacement(context, MaterialPageRoute(
       builder: (_) => ExamResultScreen(
@@ -1160,7 +1264,6 @@ class _FullExamSessionState extends State<_FullExamSession> {
     if (key == LogicalKeyboardKey.arrowRight) { _showFeedback ? _nextQuestion() : _confirmAnswer(); return KeyEventResult.handled; }
     if (key == LogicalKeyboardKey.arrowLeft) { _prevQuestion(); return KeyEventResult.handled; }
     if (key == LogicalKeyboardKey.keyV) { _toggleVoice(); return KeyEventResult.handled; }
-    if (key == LogicalKeyboardKey.keyM) { _micEnabled ? _startListening() : _toggleMic(); return KeyEventResult.handled; }
     if (key == LogicalKeyboardKey.escape) { _confirmExit(); return KeyEventResult.handled; }
     return KeyEventResult.ignored;
   }
@@ -1273,7 +1376,6 @@ class _FullExamSessionState extends State<_FullExamSession> {
     _pageCtrl.dispose();
     _focusNode.dispose();
     VoiceService.instance.stopReading();
-    VoiceService.instance.stopListening();
     super.dispose();
   }
 
@@ -1347,13 +1449,6 @@ class _FullExamSessionState extends State<_FullExamSession> {
                   color: _voiceEnabled ? Colors.white : Colors.white60),
               tooltip: 'Voice Reading (V)',
               onPressed: _toggleVoice,
-            ),
-            // Mic answer toggle
-            IconButton(
-              icon: Icon(_listening ? Icons.mic : (_micEnabled ? Icons.mic_outlined : Icons.mic_off_outlined),
-                  color: _listening ? ActColors.accent : (_micEnabled ? Colors.white : Colors.white60)),
-              tooltip: 'Voice Answer (M)',
-              onPressed: _micEnabled ? _startListening : _toggleMic,
             ),
             // Calculator toggle (Math/Science only)
             if (_showCalcButton)
@@ -1437,9 +1532,6 @@ class _FullExamSessionState extends State<_FullExamSession> {
                   onConfirm: _confirmAnswer,
                   onNext: _nextQuestion,
                   sectionColor: _sectionColor(sec.section),
-                  isListening: _listening,
-                  micEnabled: _micEnabled,
-                  onMicTap: _startListening,
                 ),
               ],
             ),
@@ -1454,40 +1546,6 @@ class _FullExamSessionState extends State<_FullExamSession> {
                   childWhenDragging: const SizedBox.shrink(),
                   child: _buildCalculator(),
                   onDragEnd: (_) {},
-                ),
-              ),
-            // Live "listening" banner — makes it obvious the mic is
-            // actually capturing audio (and what it's hearing) rather than
-            // leaving the person staring at a mic icon with no idea
-            // whether anything is happening.
-            if (_listening)
-              Positioned(
-                top: 8, left: 16, right: 16,
-                child: Material(
-                  color: Colors.transparent,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: ActColors.accent,
-                      borderRadius: BorderRadius.circular(10),
-                      boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 8)],
-                    ),
-                    child: Row(
-                      children: [
-                        const SizedBox(
-                          width: 16, height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black87),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            _listeningHeard.isEmpty ? 'Listening… say "A", "B", "C", or "D"' : 'Heard: "$_listeningHeard"',
-                            style: const TextStyle(color: Colors.black87, fontWeight: FontWeight.w700, fontSize: 12.5),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
                 ),
               ),
           ],
@@ -1656,8 +1714,7 @@ class _BottomBar extends StatelessWidget {
   final int current, total;
   final String? selectedAnswer;
   final bool showFeedback, isLastSection;
-  final bool isListening, micEnabled;
-  final VoidCallback onPrev, onConfirm, onNext, onMicTap;
+  final VoidCallback onPrev, onConfirm, onNext;
   final Color sectionColor;
 
   const _BottomBar({
@@ -1665,8 +1722,6 @@ class _BottomBar extends StatelessWidget {
     required this.showFeedback, required this.isLastSection,
     required this.onPrev, required this.onConfirm, required this.onNext,
     required this.sectionColor,
-    this.isListening = false, this.micEnabled = false,
-    required this.onMicTap,
   });
 
   @override
@@ -1683,29 +1738,6 @@ class _BottomBar extends StatelessWidget {
           icon: const Icon(Icons.arrow_back_ios_new, size: 18),
           onPressed: current > 0 ? onPrev : null,
         ),
-        // Mic button in bottom bar when mic is enabled
-        if (micEnabled)
-          GestureDetector(
-            onTap: onMicTap,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              margin: const EdgeInsets.only(right: 8),
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: isListening ? ActColors.accent.withOpacity(0.15) : Colors.transparent,
-                border: Border.all(
-                  color: isListening ? ActColors.accent : ActColors.midGray.withOpacity(0.4),
-                  width: 1.5,
-                ),
-              ),
-              child: Icon(
-                isListening ? Icons.mic : Icons.mic_outlined,
-                size: 20,
-                color: isListening ? ActColors.accent : ActColors.midGray,
-              ),
-            ),
-          ),
         const Spacer(),
         if (!showFeedback)
           FilledButton(

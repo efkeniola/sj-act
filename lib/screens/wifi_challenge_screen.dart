@@ -11,6 +11,7 @@ import 'package:nsd/nsd.dart';
 import '../data/questions_data.dart';
 import '../models/models.dart';
 import '../services/database_service.dart';
+import '../services/free_trial_service.dart';
 import '../services/user_profile_service.dart';
 import '../services/voice_service.dart';
 import '../utils/theme.dart';
@@ -71,7 +72,11 @@ enum _WifiPhase { lobby, inMatch, result }
 
 class WifiChallengeScreen extends StatefulWidget {
   final bool fullAccess;
-  const WifiChallengeScreen({super.key, this.fullAccess = true});
+  // Free-trial add-on: one HOST attempt and one JOIN attempt, each capped
+  // at 20 questions. Defaults to false so Standard/WiFi-activated callers
+  // are unaffected.
+  final bool trialMode;
+  const WifiChallengeScreen({super.key, this.fullAccess = true, this.trialMode = false});
 
   @override
   State<WifiChallengeScreen> createState() => _WifiChallengeScreenState();
@@ -141,12 +146,28 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
   DateTime? _accessPauseUntil;
   bool _practiceRequired = false;
 
+  // Free trial (see FreeTrialService): once host or join has been used
+  // during the trial, that specific tab's action is disabled — but the
+  // other one may still be available, since the trial grants one of each.
+  bool _trialHostUsed = false;
+  bool _trialJoinUsed = false;
+
   @override
   void initState() {
     super.initState();
     _tab = TabController(length: 2, vsync: this);
+    if (widget.trialMode) {
+      _questionCount = FreeTrialService.trialChallengeQuestionCount;
+      _loadTrialFlags();
+    }
     _loadName();
     _checkAccessPause();
+  }
+
+  Future<void> _loadTrialFlags() async {
+    final host = await FreeTrialService.hasUsedWifiHostTrial();
+    final join = await FreeTrialService.hasUsedWifiJoinTrial();
+    if (mounted) setState(() { _trialHostUsed = host; _trialJoinUsed = join; });
   }
 
   Future<void> _checkAccessPause() async {
@@ -179,6 +200,10 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
 
   // ── Host ──────────────────────────────────────────────────────────────────
   Future<void> _startHosting() async {
+    if (widget.trialMode && _trialHostUsed) {
+      _showSnack('Your free trial host match has already been used.');
+      return;
+    }
     if (_accessPauseUntil != null && _accessPauseUntil!.isAfter(DateTime.now())) return;
     if (_practiceRequired) {
       _showSnack('You lost a bet that requires finishing one practice set before your next WiFi Challenge.');
@@ -193,6 +218,10 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
     if (!await _isNetworkReady()) {
       _showSnack('WiFi or Hotspot is off. Turn it on and make sure it\'s connected, then try again.');
       return;
+    }
+    if (widget.trialMode) {
+      await FreeTrialService.markWifiHostTrialUsed();
+      if (mounted) setState(() => _trialHostUsed = true);
     }
     try {
       // Bind to an OS-assigned free port (0) rather than a fixed hardcoded
@@ -304,6 +333,14 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
   }
 
   Future<void> _joinRoom(_DiscoveredRoom room) async {
+    if (widget.trialMode && _trialJoinUsed) {
+      _showSnack('Your free trial join match has already been used.');
+      return;
+    }
+    if (widget.trialMode) {
+      await FreeTrialService.markWifiJoinTrialUsed();
+      if (mounted) setState(() => _trialJoinUsed = true);
+    }
     // A WiFi connect attempt can fail transiently even on a perfectly fine
     // network (the host's listen socket not quite ready yet, a brief radio
     // hiccup) — a short retry-with-backoff makes that a non-issue instead
@@ -1028,16 +1065,28 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
           ),
           const SizedBox(height: 14),
           _Label('Questions'),
-          Wrap(
-            spacing: 8,
-            children: [10, 20, 30, 40].map((n) => ChoiceChip(
-              label: Text('$n'),
-              selected: _questionCount == n,
-              selectedColor: ActColors.primary,
-              labelStyle: TextStyle(color: _questionCount == n ? Colors.white : null, fontWeight: FontWeight.w600),
-              onSelected: (_) => setState(() => _questionCount = n),
-            )).toList(),
+          IgnorePointer(
+            ignoring: widget.trialMode,
+            child: Opacity(
+              opacity: widget.trialMode ? 0.5 : 1,
+              child: Wrap(
+                spacing: 8,
+                children: [10, 20, 30, 40].map((n) => ChoiceChip(
+                  label: Text('$n'),
+                  selected: _questionCount == n,
+                  selectedColor: ActColors.primary,
+                  labelStyle: TextStyle(color: _questionCount == n ? Colors.white : null, fontWeight: FontWeight.w600),
+                  onSelected: (_) => setState(() => _questionCount = n),
+                )).toList(),
+              ),
+            ),
           ),
+          if (widget.trialMode)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text('Free trial matches are fixed at ${FreeTrialService.trialChallengeQuestionCount} questions.',
+                  style: TextStyle(fontSize: 11, color: ActColors.midGray)),
+            ),
           const SizedBox(height: 14),
           _Label('Time per Question'),
           SwitchListTile(

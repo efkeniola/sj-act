@@ -1,33 +1,26 @@
-import 'dart:async';
-import 'package:flutter/foundation.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
-import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Voice reading and speech recognition for ACT questions.
-/// STT note: on flutlab.io (web preview) microphone STT is unavailable —
-/// it requires a real Android/iOS device or desktop. TTS works on all platforms.
+/// Voice reading (text-to-speech) for ACT questions.
+///
+/// NOTE: Speech-to-text "answer by voice" (mic input for A/B/C/D) has been
+/// removed app-wide — it was unreliable across devices and is no longer
+/// exposed anywhere in the UI (Settings, Full Practice Exam, Practice
+/// Sections, etc.). This service now only handles reading questions aloud.
 class VoiceService {
   static final VoiceService instance = VoiceService._();
   VoiceService._();
 
   final FlutterTts _tts = FlutterTts();
-  final stt.SpeechToText _stt = stt.SpeechToText();
 
   bool _ttsReady = false;
-  bool _sttReady = false;
   bool _isReading = false;
-  bool _isListening = false;
-  String? _lastSttError;
 
-  static const _prefKey    = 'sj_act_voice_enabled';
-  static const _sttPrefKey = 'sj_act_stt_enabled';
+  static const _prefKey = 'sj_act_voice_enabled';
 
   // ── Init ──────────────────────────────────────────────────────────────────
   Future<void> init() async {
     await _initTts();
-    if (!kIsWeb) await _initStt();
   }
 
   Future<void> _initTts() async {
@@ -40,17 +33,6 @@ class VoiceService {
     } catch (_) { _ttsReady = false; }
   }
 
-  Future<void> _initStt() async {
-    try {
-      final granted = await Permission.microphone.isGranted;
-      if (!granted) return;
-      _sttReady = await _stt.initialize(
-        onError: (e) { _isListening = false; _lastSttError = e.errorMsg; },
-        onStatus: (s) { if (s == 'done' || s == 'notListening') _isListening = false; },
-      );
-    } catch (_) { _sttReady = false; }
-  }
-
   // ── Prefs ─────────────────────────────────────────────────────────────────
   Future<bool> isTtsEnabled() async {
     final p = await SharedPreferences.getInstance();
@@ -61,27 +43,8 @@ class VoiceService {
     await p.setBool(_prefKey, v);
     if (!v) stopReading();
   }
-  Future<bool> isSttEnabled() async {
-    if (kIsWeb) return false; // STT unavailable on web
-    final p = await SharedPreferences.getInstance();
-    return p.getBool(_sttPrefKey) ?? false;
-  }
-  Future<void> setSttEnabled(bool v) async {
-    final p = await SharedPreferences.getInstance();
-    await p.setBool(_sttPrefKey, v);
-    if (!v) stopListening();
-  }
 
   bool get ttsReady => _ttsReady;
-  bool get sttReady => _sttReady && !kIsWeb;
-  bool get isListening => _isListening;
-
-  /// Returns a user-facing message explaining why STT is unavailable.
-  String get sttUnavailableReason {
-    if (kIsWeb) return 'Voice answer input is not available in the web/flutlab preview. '
-        'Install the app on a real Android or iOS device to use this feature.';
-    return 'Microphone permission required. Enable it in device settings.';
-  }
 
   // ── TTS ───────────────────────────────────────────────────────────────────
   Future<void> readQuestion({required String questionText, required List<String> options}) async {
@@ -129,212 +92,6 @@ class VoiceService {
     _isReading = false;
   }
 
-  // ── STT ───────────────────────────────────────────────────────────────────
-  /// Listens for a spoken "A"/"B"/"C"/"D" answer.
-  ///
-  /// [onUnrecognised] receives a human-readable reason so the UI can tell the
-  /// user *why* it failed (permission blocked, no speech engine on the
-  /// device, nothing understood, etc.) instead of always showing the same
-  /// generic "couldn't detect an answer" message.
-  ///
-  /// [onPartial] fires on every partial (in-progress) transcript, purely so
-  /// the UI can show live "heard so far: ..." feedback — this is what makes
-  /// it possible to actually tell whether the mic is picking up audio at
-  /// all versus picking it up but failing to parse it as a letter, instead
-  /// of both cases looking identical ("nothing happened").
-  Future<void> listenForAnswer({
-    required void Function(String letter) onResult,
-    void Function(String reason)? onUnrecognised,
-    void Function(String partialText)? onPartial,
-    Duration timeout = const Duration(seconds: 10),
-  }) async {
-    // STT not available on web (flutlab.io)
-    if (kIsWeb) {
-      onUnrecognised?.call(sttUnavailableReason);
-      return;
-    }
-    if (_isListening) return;
-
-    // Request mic permission (this also correctly re-prompts the very first
-    // time, even if _initStt() skipped initialisation earlier because
-    // permission wasn't granted yet at app start).
-    final status = await Permission.microphone.request();
-    if (status == PermissionStatus.permanentlyDenied) {
-      onUnrecognised?.call(
-        'Microphone permission is blocked for this app. Please enable it in '
-        'your device Settings → Apps → SJ ACT → Permissions → Microphone.',
-      );
-      return;
-    }
-    if (status != PermissionStatus.granted) {
-      onUnrecognised?.call('Microphone permission is required to answer by voice.');
-      return;
-    }
-
-    // Initialise (or re-initialise) the recognizer now that we know we have
-    // permission. onError always writes into _lastSttError so any failure —
-    // whether during this initialize() call or during the listen() session
-    // right after — is available to explain a failed attempt.
-    //
-    // Re-initialising on every single call (not just when !_sttReady) used
-    // to leave a stale/wedged recognizer session in place on some devices
-    // after a prior failed attempt — that's what could make it look like
-    // "the mic lights up but literally nothing happens" on a retry. Forcing
-    // a full stop + fresh initialize before every listen makes each attempt
-    // independent of whatever state the previous one left behind.
-    _lastSttError = null;
-    try { await _stt.stop(); } catch (_) {}
-    _sttReady = await _stt.initialize(
-      onError: (e) { _isListening = false; _lastSttError = e.errorMsg; },
-      onStatus: (s) { if (s == 'done' || s == 'notListening') _isListening = false; },
-    );
-    if (!_sttReady) {
-      onUnrecognised?.call(
-        'Speech recognition is not available on this device'
-        '${_lastSttError != null ? ' ($_lastSttError)' : ''}. '
-        'Make sure a speech-recognition service (e.g. Google app) is installed and up to date.',
-      );
-      return;
-    }
-
-    _isListening = true;
-    bool resultFired = false;
-
-    void finish(String? letter, String? reason, String heardRaw) {
-      if (resultFired) return;
-      resultFired = true;
-      _isListening = false;
-      _stt.stop();
-      if (letter != null) {
-        onResult(letter);
-      } else if (reason != null) {
-        onUnrecognised?.call(reason);
-      } else if (heardRaw.isEmpty) {
-        onUnrecognised?.call('Didn\'t catch that — no speech was detected. Try again.');
-      } else {
-        onUnrecognised?.call('Heard "$heardRaw" — please say just "A", "B", "C", or "D".');
-      }
-    }
-
-    // Set a hard timeout in case the STT callback never fires at all —
-    // this is the difference between "the mic icon stays yellow forever
-    // with no feedback" and actually telling the person something failed.
-    final hardTimeout = Timer(timeout + const Duration(seconds: 3), () {
-      finish(null, _lastSttError ?? 'Didn\'t catch that — no speech was detected. Try again.', '');
-    });
-
-    try {
-      await _stt.listen(
-        onResult: (result) {
-          final spoken = result.recognizedWords.toLowerCase().trim();
-          onPartial?.call(result.recognizedWords);
-
-          // Accept a confident match on a PARTIAL result immediately,
-          // rather than only ever acting on result.finalResult. Several
-          // Android speech-recognition services reliably deliver a clean
-          // partial transcript within a second or two but then either
-          // delay the "final" flag well past what feels responsive, or —
-          // on some devices/firmware — never mark a result final at all
-          // for a single-word utterance, relying entirely on the pauseFor
-          // silence timeout to end the session. Waiting only for
-          // finalResult made those sessions look completely dead even
-          // though the word "A" had already been heard and understood.
-          final detected = _detectOptionFromSpeech(spoken);
-          if (detected != null) {
-            hardTimeout.cancel();
-            finish(detected, null, spoken);
-            return;
-          }
-
-          if (result.finalResult) {
-            hardTimeout.cancel();
-            finish(null, null, spoken);
-          }
-        },
-        listenFor: timeout,
-        pauseFor: const Duration(seconds: 3),
-        localeId: 'en_US',
-        cancelOnError: true,
-        partialResults: true,
-        listenMode: stt.ListenMode.search,
-        // ListenMode.search maps to Android's web-search language model,
-        // which is tuned for short single-word/short-phrase utterances —
-        // a much better match for "A"/"B"/"C"/"D" than
-        // ListenMode.confirmation, which is tuned for full yes/no-style
-        // sentences and was mis-hearing or dropping single letters.
-        // NOTE: this used to force onDevice: true ("prefer the on-device
-        // recognizer so voice answers keep working offline"). In practice
-        // that's not a safe assumption — plenty of Android phones (older
-        // devices, and many outside the US) don't have an offline speech
-        // model downloaded at all, and forcing on-device recognition on
-        // those devices doesn't reliably fall back online the way the
-        // plugin's docs imply. Instead it just fails to produce any
-        // result — which looks exactly like "the mic lights up but saying
-        // 'A' never selects anything." Letting the platform pick
-        // (online-preferred, falling back to on-device where available)
-        // is far more reliable across real devices.
-      );
-    } catch (e) {
-      hardTimeout.cancel();
-      finish(null, 'Voice recognition failed to start. Please try again.', '');
-    }
-  }
-
-  void stopListening() {
-    if (!kIsWeb) _stt.stop();
-    _isListening = false;
-  }
-
-  // ── Speech → letter detection ─────────────────────────────────────────────
-  static String? _detectOptionFromSpeech(String spoken) {
-    final s = spoken.toLowerCase().trim();
-    if (s.isEmpty) return null;
-
-    // Exact single letter
-    if (RegExp(r'^\s*a\s*$').hasMatch(s)) return 'A';
-    if (RegExp(r'^\s*b\s*$').hasMatch(s)) return 'B';
-    if (RegExp(r'^\s*c\s*$').hasMatch(s)) return 'C';
-    if (RegExp(r'^\s*d\s*$').hasMatch(s)) return 'D';
-
-    // Phrase patterns
-    final patterns = [
-      RegExp(r"\b(option|answer|choice|letter|pick|select|go with|i\s*choose|i\s*think|it'?s?)\s+([abcd])\b"),
-      RegExp(r'\b([abcd])\s+(is\s+)?(correct|right|the answer)\b'),
-      RegExp(r'the answer is\s+([abcd])\b'),
-      RegExp(r'\bmy answer is\s+([abcd])\b'),
-      RegExp(r'\bi (pick|choose|select|say)\s+([abcd])\b'),
-    ];
-
-    for (final pattern in patterns) {
-      final match = pattern.firstMatch(s);
-      if (match != null) {
-        // Try last group first (most specific)
-        String? letter;
-        for (int g = match.groupCount; g >= 1; g--) {
-          final grp = match.group(g)?.toUpperCase();
-          if (grp != null && ['A','B','C','D'].contains(grp)) {
-            letter = grp; break;
-          }
-        }
-        if (letter != null) return letter;
-      }
-    }
-
-    // Phonetic fallbacks
-    if (RegExp(r'\bay\b').hasMatch(s)) return 'A';
-    if (RegExp(r'\bbee\b').hasMatch(s)) return 'B';
-    if (RegExp(r'\b(see|sea|si)\b').hasMatch(s)) return 'C';
-    if (RegExp(r'\b(dee|di)\b').hasMatch(s)) return 'D';
-
-    // Last-resort: first letter in string
-    final firstLetter = RegExp(r'\b([abcd])\b').firstMatch(s);
-    if (firstLetter != null) {
-      return firstLetter.group(1)!.toUpperCase();
-    }
-
-    return null;
-  }
-
   // ── Keyboard shortcuts reference ──────────────────────────────────────────
   static const Map<String, String> keyboardShortcuts = {
     'A / 1': 'Select option A',
@@ -345,7 +102,6 @@ class VoiceService {
     '→ Right Arrow': 'Confirm / Next',
     '← Left Arrow': 'Previous question',
     'V': 'Toggle voice reading',
-    'M': 'Toggle microphone input',
     'Escape': 'Exit session',
   };
 }

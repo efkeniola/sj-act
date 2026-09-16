@@ -28,6 +28,11 @@ class SectionScreen extends StatefulWidget {
   // no manual "Next" tap needed. Null (the default) preserves the normal
   // self-paced practice behaviour for every other caller.
   final int? questionTimeLimitSeconds;
+  // Which question bank to pull from — 1, 2, or 3. Defaults to 1 so every
+  // existing caller keeps behaving exactly as before. The home screen is
+  // responsible for only ever passing 2 or 3 when Standard activation is
+  // active (Sets 2/3 practice is locked on the free plan).
+  final int setNumber;
 
   const SectionScreen({
     super.key,
@@ -36,6 +41,7 @@ class SectionScreen extends StatefulWidget {
     this.isChallengeMode = false,
     this.randomMixSubjects = false,
     this.questionTimeLimitSeconds,
+    this.setNumber = 1,
   });
 
   @override
@@ -49,9 +55,6 @@ class _SectionScreenState extends State<SectionScreen> {
   String? _selectedAnswer;
   bool _showFeedback = false;
   bool _voiceEnabled = false;
-  bool _micEnabled = false;
-  bool _listening = false;
-  String _listeningHeard = '';
   bool _paused = false;
   bool _calcVisible = false;
 
@@ -86,7 +89,9 @@ class _SectionScreenState extends State<SectionScreen> {
   }
 
   List<ActQuestion> _buildQuestionList() {
-    final pool = widget.randomMixSubjects ? questionsForRandomMix() : questionsForSection(widget.section);
+    final pool = widget.randomMixSubjects
+        ? questionsForRandomMix(setNumber: widget.setNumber)
+        : questionsForSection(widget.section, setNumber: widget.setNumber);
     if (pool.isEmpty) return [];
     final count = widget.questionCount ?? pool.length;
     if (count >= pool.length) return List.from(pool);
@@ -155,8 +160,7 @@ class _SectionScreenState extends State<SectionScreen> {
   Future<void> _loadVoicePrefs() async {
     await VoiceService.instance.init();
     final tts = await VoiceService.instance.isTtsEnabled();
-    final mic = await VoiceService.instance.isSttEnabled();
-    if (mounted) setState(() { _voiceEnabled = tts; _micEnabled = mic; });
+    if (mounted) setState(() { _voiceEnabled = tts; });
     if (tts) _readCurrentQuestion();
   }
 
@@ -166,49 +170,6 @@ class _SectionScreenState extends State<SectionScreen> {
     VoiceService.instance.readQuestion(
       questionText: q.questionText,
       options: q.options,
-    );
-  }
-
-  void _startListening() async {
-    if (!_micEnabled || _listening) return;
-    setState(() { _listening = true; _listeningHeard = ''; });
-    await VoiceService.instance.listenForAnswer(
-      onPartial: (text) {
-        // Live "heard so far" text while listening, so it's immediately
-        // obvious whether the mic is picking up audio at all (vs. picking
-        // it up but failing to parse it as a letter) — those two failure
-        // modes used to look completely identical from the outside.
-        if (mounted) setState(() => _listeningHeard = text);
-      },
-      onResult: (letter) {
-        if (mounted) setState(() { _listening = false; _selectAnswer(letter); });
-      },
-      onUnrecognised: (reason) {
-        if (mounted) setState(() => _listening = false);
-        _showVoiceIssue(reason);
-      },
-    );
-  }
-
-  /// A blocking dialog rather than a SnackBar — a SnackBar auto-dismisses
-  /// in a few seconds and is easy to miss entirely if you're not looking
-  /// at the bottom of the screen right at that moment, which made voice
-  /// failures look like nothing happened at all instead of showing why.
-  void _showVoiceIssue(String reason) {
-    if (!mounted) return;
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Voice answer'),
-        content: Text(reason),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK')),
-          TextButton(
-            onPressed: () { Navigator.pop(context); _startListening(); },
-            child: const Text('Try Again'),
-          ),
-        ],
-      ),
     );
   }
 
@@ -282,7 +243,7 @@ class _SectionScreenState extends State<SectionScreen> {
       id: DateTime.now().toIso8601String(),
       startedAt: DateTime.now().subtract(Duration(seconds: _totalSeconds - _secondsLeft)),
       completedAt: DateTime.now(),
-      setNumber: 1,
+      setNumber: widget.setNumber,
       section: widget.section,
       results: results,
     );
@@ -322,7 +283,6 @@ class _SectionScreenState extends State<SectionScreen> {
     if (key == LogicalKeyboardKey.arrowLeft || key == LogicalKeyboardKey.keyP) { _prevQuestion(); return KeyEventResult.handled; }
     if (key == LogicalKeyboardKey.backspace) { setState(() { _selectedAnswer = null; _showFeedback = false; }); return KeyEventResult.handled; }
     if (key == LogicalKeyboardKey.keyV) { _toggleVoice(); return KeyEventResult.handled; }
-    if (key == LogicalKeyboardKey.keyM) { _toggleMic(); return KeyEventResult.handled; }
     if (key == LogicalKeyboardKey.escape) { _confirmExit(); return KeyEventResult.handled; }
     if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.space) { _showFeedback ? _nextQuestion() : _confirmAnswer(); return KeyEventResult.handled; }
     return KeyEventResult.ignored;
@@ -333,16 +293,6 @@ class _SectionScreenState extends State<SectionScreen> {
     await VoiceService.instance.setTtsEnabled(newVal);
     setState(() => _voiceEnabled = newVal);
     if (newVal) _readCurrentQuestion();
-  }
-
-  void _toggleMic() async {
-    final newVal = !_micEnabled;
-    await VoiceService.instance.setSttEnabled(newVal);
-    setState(() => _micEnabled = newVal);
-    // Turning the mic on should also start listening right away — otherwise
-    // a single tap looks like it "did nothing" because it only flips a
-    // setting, and the user's spoken answer right after is never captured.
-    if (newVal) _startListening();
   }
 
   void _confirmExit() {
@@ -382,7 +332,6 @@ class _SectionScreenState extends State<SectionScreen> {
     _pageCtrl.dispose();
     _focusNode.dispose();
     VoiceService.instance.stopReading();
-    VoiceService.instance.stopListening();
     super.dispose();
   }
 
@@ -440,13 +389,6 @@ class _SectionScreenState extends State<SectionScreen> {
                   color: _voiceEnabled ? Colors.white : Colors.white60),
               tooltip: 'Voice Reading (V)',
               onPressed: _toggleVoice,
-            ),
-            // Mic toggle
-            IconButton(
-              icon: Icon(_listening ? Icons.mic : (_micEnabled ? Icons.mic_outlined : Icons.mic_off_outlined),
-                  color: _listening ? ActColors.accent : (_micEnabled ? Colors.white : Colors.white60)),
-              tooltip: 'Voice Answer (M)',
-              onPressed: _micEnabled ? _startListening : _toggleMic,
             ),
             // Calculator (Math & Science only)
             if (_currentQuestionSection == ActSection.math || _currentQuestionSection == ActSection.science)
@@ -522,9 +464,6 @@ class _SectionScreenState extends State<SectionScreen> {
                     onPrev: _prevQuestion,
                     onConfirm: _confirmAnswer,
                     onNext: _nextQuestion,
-                    isListening: _listening,
-                    micEnabled: _micEnabled,
-                    onMicTap: _startListening,
                   ),
                 ],
               ),
@@ -536,40 +475,6 @@ class _SectionScreenState extends State<SectionScreen> {
                         display: _calcDisplay,
                         onInput: (token) => setState(() => _calcInput(token)),
                         onClose: () => setState(() => _calcVisible = false),
-                      ),
-                    ),
-                  // Live "listening" banner — makes it obvious the mic is
-                  // actually capturing audio (and what it's hearing) rather
-                  // than leaving the person staring at a mic icon with no
-                  // idea whether anything is happening.
-                  if (_listening)
-                    Positioned(
-                      top: 8, left: 16, right: 16,
-                      child: Material(
-                        color: Colors.transparent,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                          decoration: BoxDecoration(
-                            color: ActColors.accent,
-                            borderRadius: BorderRadius.circular(10),
-                            boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 8)],
-                          ),
-                          child: Row(
-                            children: [
-                              const SizedBox(
-                                width: 16, height: 16,
-                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black87),
-                              ),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: Text(
-                                  _listeningHeard.isEmpty ? 'Listening… say "A", "B", "C", or "D"' : 'Heard: "$_listeningHeard"',
-                                  style: const TextStyle(color: Colors.black87, fontWeight: FontWeight.w700, fontSize: 12.5),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
                       ),
                     ),
                 ],
@@ -809,14 +714,13 @@ class _ExplanationCard extends StatelessWidget {
 class _BottomBar extends StatelessWidget {
   final int current, total;
   final String? selectedAnswer;
-  final bool showFeedback, isListening, micEnabled;
-  final VoidCallback onPrev, onConfirm, onNext, onMicTap;
+  final bool showFeedback;
+  final VoidCallback onPrev, onConfirm, onNext;
 
   const _BottomBar({
     required this.current, required this.total,
     required this.selectedAnswer, required this.showFeedback,
     required this.onPrev, required this.onConfirm, required this.onNext,
-    required this.isListening, required this.micEnabled, required this.onMicTap,
   });
 
   @override
@@ -836,27 +740,6 @@ class _BottomBar extends StatelessWidget {
             tooltip: 'Previous (P / Left)',
             onPressed: current > 0 ? onPrev : null,
           ),
-
-          // Mic button
-          if (micEnabled) ...[
-            const SizedBox(width: 4),
-            GestureDetector(
-              onTap: onMicTap,
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: isListening ? ActColors.primary : ActColors.primary.withOpacity(0.10),
-                ),
-                child: Icon(
-                  isListening ? Icons.mic : Icons.mic_outlined,
-                  color: isListening ? Colors.white : ActColors.primary,
-                  size: 20,
-                ),
-              ),
-            ),
-          ],
 
           const Spacer(),
 
