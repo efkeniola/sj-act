@@ -444,16 +444,23 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ── Online Challenge access control ─────────────────────────────────────
+  // NOTE: this only DECIDES whether a free daily match is available and
+  // grants entry to the screen — it deliberately does NOT call
+  // DailyUsageService.recordOnlineUsage() here anymore. That used to burn
+  // the day's free match the instant this tile was tapped, even if the
+  // person immediately backed out without ever starting a match. The
+  // actual recording now happens inside OnlineChallengeScreen itself, at
+  // the moment the match truly begins (_startMatch()) — see
+  // `countsAgainstDailyFree` below.
   Future<void> _onOnlineChallengeTap() async {
     if (_onlineActive) {
-      _pushOnlineChallenge(trialMode: false);
+      _pushOnlineChallenge(trialMode: false, countsAgainstDailyFree: false);
       return;
     }
     if (_standardActive) {
       final remaining = await DailyUsageService.onlineRemainingToday();
       if (remaining > 0) {
-        await DailyUsageService.recordOnlineUsage();
-        _pushOnlineChallenge(trialMode: false);
+        _pushOnlineChallenge(trialMode: false, countsAgainstDailyFree: true);
       } else if (mounted) {
         _showLimitDialog(
           'Online Challenge',
@@ -464,30 +471,38 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
     if (await FreeTrialService.canUseOnlineTrial()) {
-      _pushOnlineChallenge(trialMode: true);
+      _pushOnlineChallenge(trialMode: true, countsAgainstDailyFree: false);
       return;
     }
     _promptActivation(cat: AppConstants.catOnlineChallenge);
   }
 
-  void _pushOnlineChallenge({required bool trialMode}) {
+  void _pushOnlineChallenge({required bool trialMode, required bool countsAgainstDailyFree}) {
     Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => OnlineChallengeScreen(trialMode: trialMode)),
+      MaterialPageRoute(
+          builder: (_) => OnlineChallengeScreen(
+                trialMode: trialMode,
+                countsAgainstDailyFree: countsAgainstDailyFree,
+              )),
     ).then((_) => _load());
   }
 
   // ── WiFi Challenge access control ───────────────────────────────────────
+  // Same fix as Online Challenge above: this only CHECKS how many free
+  // matches are left today and decides whether to let the person in — the
+  // actual DailyUsageService.recordWifiUsage() call now happens inside
+  // WifiChallengeScreen itself, when the match actually starts
+  // (_applyStartPayload()), not the moment this tile is tapped.
   Future<void> _onWifiChallengeTap() async {
     if (_wifiActive) {
-      _pushWifiChallenge(fullAccess: true, trialMode: false);
+      _pushWifiChallenge(fullAccess: true, trialMode: false, countsAgainstDailyFree: false);
       return;
     }
     if (_standardActive) {
       final used = await DailyUsageService.getWifiUsedToday();
       if (used < 1) {
-        await DailyUsageService.recordWifiUsage();
-        _pushWifiChallenge(fullAccess: false, trialMode: false);
+        _pushWifiChallenge(fullAccess: false, trialMode: false, countsAgainstDailyFree: true);
         return;
       }
       if (used >= DailyUsageService.freeWifiPerDay) {
@@ -515,8 +530,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!mounted) return;
       final unlocked = await DailyUsageService.recordWifiGateAnswer(correct: correct);
       if (unlocked) {
-        await DailyUsageService.recordWifiUsage();
-        _pushWifiChallenge(fullAccess: false, trialMode: false);
+        _pushWifiChallenge(fullAccess: false, trialMode: false, countsAgainstDailyFree: true);
       } else if (await DailyUsageService.isWifiSecondMatchBlockedForToday()) {
         if (mounted) {
           _showLimitDialog(
@@ -534,16 +548,21 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     // Free plan: only the trial can unlock WiFi Challenge (host or join).
     if (await FreeTrialService.canUseWifiHostTrial() || await FreeTrialService.canUseWifiJoinTrial()) {
-      _pushWifiChallenge(fullAccess: false, trialMode: true);
+      _pushWifiChallenge(fullAccess: false, trialMode: true, countsAgainstDailyFree: false);
       return;
     }
     _promptActivation(cat: AppConstants.catWifiChallenge);
   }
 
-  void _pushWifiChallenge({required bool fullAccess, required bool trialMode}) {
+  void _pushWifiChallenge({required bool fullAccess, required bool trialMode, required bool countsAgainstDailyFree}) {
     Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => WifiChallengeScreen(fullAccess: fullAccess, trialMode: trialMode)),
+      MaterialPageRoute(
+          builder: (_) => WifiChallengeScreen(
+                fullAccess: fullAccess,
+                trialMode: trialMode,
+                countsAgainstDailyFree: countsAgainstDailyFree,
+              )),
     ).then((_) => _load());
   }
 

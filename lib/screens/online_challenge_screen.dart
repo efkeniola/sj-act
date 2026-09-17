@@ -8,6 +8,7 @@ import '../data/questions_data.dart';
 import '../models/models.dart';
 import '../multiplayer/fake_online_challenge.dart';
 import '../services/database_service.dart';
+import '../services/daily_usage_service.dart';
 import '../services/free_trial_service.dart';
 import '../services/leaderboard_service.dart';
 import '../services/user_profile_service.dart';
@@ -26,7 +27,16 @@ class OnlineChallengeScreen extends StatefulWidget {
   // Defaults to false so every other caller (Standard/Online activation)
   // is unaffected.
   final bool trialMode;
-  const OnlineChallengeScreen({super.key, this.trialMode = false});
+  // True only for a Standard-activation user spending their one free
+  // daily match. When true, the day's free-match counter is decremented
+  // at the moment the match actually STARTS (_startMatch()) — not when
+  // this screen is merely opened — so backing out of setup/search before
+  // an opponent is even found never costs the day's free match. Callers
+  // that already have full Online Challenge activation (unlimited) or are
+  // using the free trial (tracked separately by FreeTrialService) should
+  // leave this false.
+  final bool countsAgainstDailyFree;
+  const OnlineChallengeScreen({super.key, this.trialMode = false, this.countsAgainstDailyFree = false});
 
   @override
   State<OnlineChallengeScreen> createState() => _OnlineChallengeScreenState();
@@ -56,6 +66,7 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
   // Host auto-start (2 minutes) once matched
   Timer? _hostStartTimer;
   int _hostStartSecondsLeft = 120;
+  bool _dailyUsageRecorded = false; // guards against double-counting a single match start
 
   final List<Map<String, dynamic>> _chatMessages = [];
   final _chatCtrl = TextEditingController();
@@ -375,6 +386,14 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
     if (_opponentName == null) return;
     _hostStartTimer?.cancel();
     _netMonitorTimer?.cancel();
+    // Record the free-daily-match usage HERE — the moment the match
+    // actually begins — never when the screen was merely opened. Guarded
+    // so a rare race between the manual button and the auto-start timer
+    // can't burn two matches for one game.
+    if (widget.countsAgainstDailyFree && !_dailyUsageRecorded) {
+      _dailyUsageRecorded = true;
+      DailyUsageService.recordOnlineUsage();
+    }
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(

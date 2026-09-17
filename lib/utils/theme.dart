@@ -66,6 +66,38 @@ class ActColors {
   }
 }
 
+/// Adaptive color helpers for screens that build their own containers/text
+/// instead of relying purely on CardTheme — added for the in-app purchase
+/// screens (plan picker, checkout). Learned from a dark-mode bug in the
+/// SAT app's equivalent screens (Colors.white cards + inherited near-white
+/// dark-theme text = invisible), so ACT's version is built with these
+/// from the start. Use these instead of raw Colors.white/grey/black in
+/// any new screen that needs to look right in both themes.
+extension AdaptiveColors on BuildContext {
+  bool get isDark => Theme.of(this).brightness == Brightness.dark;
+
+  /// Card/sheet background — matches CardTheme's surface colors.
+  Color get surfaceColor => isDark ? ActColors.darkCard : ActColors.lightCard;
+
+  /// A step above [surfaceColor] — for a "box within a card" (e.g. an
+  /// order-summary panel sitting inside a screen's body).
+  Color get panelColor => isDark ? const Color(0xFF262629) : const Color(0xFFF5F5F5);
+
+  /// Primary readable text — near-black on light, near-white on dark.
+  Color get textColor => isDark ? const Color(0xFFEDEEF0) : const Color(0xFF1A1C1E);
+
+  /// Secondary/caption text — always has enough contrast against
+  /// [surfaceColor]/[panelColor] in either theme.
+  Color get mutedTextColor => isDark ? const Color(0xFFACACB0) : ActColors.midGray;
+
+  /// Faint hairline / border — visible against either surface color.
+  Color get hairlineColor => isDark ? ActColors.darkBorder : ActColors.lightBorder;
+
+  /// Elevation shadow — near-invisible black shadows on a dark background
+  /// are pointless, so this uses a stronger shadow there instead.
+  Color get shadowColor => isDark ? Colors.black.withOpacity(0.45) : Colors.black.withOpacity(0.08);
+}
+
 class AppTheme {
   static ThemeData light = ThemeData(
     brightness: Brightness.light,

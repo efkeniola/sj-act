@@ -10,6 +10,7 @@ import 'package:nsd/nsd.dart';
 
 import '../data/questions_data.dart';
 import '../models/models.dart';
+import '../services/daily_usage_service.dart';
 import '../services/database_service.dart';
 import '../services/free_trial_service.dart';
 import '../services/user_profile_service.dart';
@@ -76,7 +77,22 @@ class WifiChallengeScreen extends StatefulWidget {
   // at 20 questions. Defaults to false so Standard/WiFi-activated callers
   // are unaffected.
   final bool trialMode;
-  const WifiChallengeScreen({super.key, this.fullAccess = true, this.trialMode = false});
+  // True only for a Standard-activation user spending one of their free
+  // daily matches. When true, the day's free-match counter is decremented
+  // at the moment the match actually STARTS (_applyStartPayload(), once
+  // both sides are ready and questions begin) — not when this screen is
+  // merely opened to host/search for a room. Backing out during setup,
+  // discovery, or a room that never gets an opponent never costs a free
+  // match. Callers with full WiFi Challenge activation (unlimited) or
+  // using the free trial (tracked separately by FreeTrialService) should
+  // leave this false.
+  final bool countsAgainstDailyFree;
+  const WifiChallengeScreen({
+    super.key,
+    this.fullAccess = true,
+    this.trialMode = false,
+    this.countsAgainstDailyFree = false,
+  });
 
   @override
   State<WifiChallengeScreen> createState() => _WifiChallengeScreenState();
@@ -84,6 +100,7 @@ class WifiChallengeScreen extends StatefulWidget {
 
 class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTickerProviderStateMixin {
   late TabController _tab;
+  bool _dailyUsageRecorded = false; // guards against double-counting a single match start
 
   // Host state
   Registration? _registration;
@@ -650,6 +667,14 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
 
   void _applyStartPayload(Map<String, dynamic> data) {
     if (_phase == _WifiPhase.inMatch) return; // already in, ignore a repeat
+    // Record the free-daily-match usage HERE — the moment the match
+    // actually begins for THIS device (host or joiner alike; each device
+    // tracks its own daily quota independently) — never when the room
+    // screen was merely opened. See countsAgainstDailyFree's doc comment.
+    if (widget.countsAgainstDailyFree && !_dailyUsageRecorded) {
+      _dailyUsageRecorded = true;
+      DailyUsageService.recordWifiUsage();
+    }
     _matchLaunched = true;
     final ids = (data['ids'] as List).cast<String>();
     final mixed = data['mixed'] as bool? ?? false;

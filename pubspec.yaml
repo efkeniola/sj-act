@@ -46,6 +46,10 @@ dependencies:
   # package info for about screen
   package_info_plus: ^8.1.1
 
+  # ── In-app purchase: Google Play Billing (ACT plan checkout) ─────
+  in_app_purchase: ^3.2.3
+  in_app_purchase_android: ^0.5.3
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

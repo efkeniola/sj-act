@@ -128,4 +128,67 @@ class AppConstants {
   // ── Free tier ────────────────────────────────────────
   static const int freeDailyQuestionCap = 20;
   static const int freeOnlineChallengesPerDay = 1;
+
+  // ── In-app purchase (Google Play Billing) ────────────
+  // Product ids MUST exactly match what's created in Play Console
+  // (Monetize -> Subscriptions) and what act/play_plans.py expects.
+  // "full" (lifetime WiFi Challenge, $40) is deliberately NOT sold via
+  // Play — it stays website/Flutterwave-only (see that file's docstring).
+  //
+  // Prices here are base price + 7.5% platform fee, rounded up to the
+  // nearest .99 — must match Play Console exactly. This local copy is
+  // only the offline-safe fallback; PlayCatalogService prefers the live
+  // /payments/play-catalog/ value whenever it can reach the server.
+  static const Map<String, Map<String, double>> playPriceUsd = {
+    catStandard: {'3m': 13.99, '6m': 26.99, '1y': 48.99},
+    catOnlineChallenge: {'3m': 6.99, '6m': 11.99, '1y': 23.99},
+    catWifiChallenge: {'3m': 7.99, '6m': 13.99, '1y': 26.99},
+  };
+
+  static const Map<String, List<String>> catPlayDurations = {
+    catStandard: ['3m', '6m', '1y'],
+    catOnlineChallenge: ['3m', '6m', '1y'],
+    catWifiChallenge: ['3m', '6m', '1y'],
+  };
+
+  static const Map<String, String> durationLabels = {
+    '3m': '3 Months',
+    '6m': '6 Months',
+    '1y': '1 Year',
+  };
+
+  static const Map<String, String> categoryLabels = {
+    catStandard: 'Standard',
+    catOnlineChallenge: 'Online Challenge',
+    catWifiChallenge: 'WiFi Challenge',
+  };
+
+  static const Map<String, List<String>> categoryFeatures = {
+    catStandard: [
+      'Full ACT question bank across English, Math, Reading, and Science',
+      'Score prediction, full syllabus, timetable, and progress analytics',
+      'Built-in graphing calculator for the Math section',
+    ],
+    catOnlineChallenge: [
+      'Unlimited matches against a simulated opponent — no daily cap',
+      'USA Room and Foreign Room, with optional bets on the outcome',
+    ],
+    catWifiChallenge: [
+      'Real-time 1v1 battles with a friend over WiFi — no daily limit',
+      'In-match chat, bet proposals, and real leaderboard ranking impact',
+    ],
+  };
+
+  /// 'act_wifi_6m', 'act_standard_1y', etc. — must match
+  /// act/play_plans.py product_id_for() exactly.
+  static String playProductId(String category, String duration) {
+    final slug = category == catWifiChallenge
+        ? 'wifi'
+        : category == catOnlineChallenge
+            ? 'online'
+            : 'standard';
+    return 'act_${slug}_$duration';
+  }
+
+  static const double platformFeeRate = 0.075;
 }

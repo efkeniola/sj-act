@@ -6,6 +6,7 @@ import '../services/activation_service.dart';
 import '../services/user_profile_service.dart';
 import '../utils/constants.dart';
 import '../utils/theme.dart';
+import 'act_plan_selection_screen.dart';
 
 class ActivationScreen extends StatefulWidget {
   final String initialCategory;
@@ -124,6 +125,57 @@ class _ActivationScreenState extends State<ActivationScreen> {
 
                   // ── Get code banner ──────────────────────────────────
                   _GetCodeBanner(onTap: _openStore),
+                  const SizedBox(height: 12),
+
+                  // ── Buy now with Google Play (in-app purchase) ────────
+                  // Distinct from the banner above: that one sends people
+                  // to the website (Flutterwave, card/bank); this one buys
+                  // and activates right here, in-app, via Google Play.
+                  InkWell(
+                    borderRadius: BorderRadius.circular(16),
+                    onTap: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(builder: (_) => const ActPlanSelectionScreen()),
+                      );
+                    },
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Theme.of(context).colorScheme.primary, width: 1.5),
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: Theme.of(context).colorScheme.primary.withOpacity(context.isDark ? 0.2 : 0.1),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Icon(Icons.shop_outlined, color: Theme.of(context).colorScheme.primary),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('Buy now with Google Play',
+                                    style: TextStyle(
+                                        color: Theme.of(context).colorScheme.primary,
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 14)),
+                                const SizedBox(height: 2),
+                                Text('Pick your plan and pay securely — activates instantly',
+                                    style: TextStyle(color: context.mutedTextColor, fontSize: 12)),
+                              ],
+                            ),
+                          ),
+                          Icon(Icons.arrow_forward_ios_rounded, color: Theme.of(context).colorScheme.primary, size: 16),
+                        ],
+                      ),
+                    ),
+                  ),
                   const SizedBox(height: 24),
 
                   // ── Activation form ───────────────────────────────────
