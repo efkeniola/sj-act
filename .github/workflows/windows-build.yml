@@ -1,0 +1,51 @@
+name: Windows Build (ACT)
+
+# Manual only — deliberately no `push:` trigger, so this never runs
+# automatically when you commit/push. Trigger it yourself from the
+# GitHub Actions tab: Actions -> "Windows Build (ACT)" -> "Run workflow".
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    env:
+      PUB_CACHE: ${{ github.workspace }}\.pub-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Clean old build output
+        run: flutter clean
+
+      - name: Get packages
+        run: flutter pub get
+
+      - name: Create windows platform files (if missing)
+        run: |
+          if (!(Test-Path "windows")) {
+            flutter create --platforms=windows .
+          }
+
+      - name: Apply custom app icon
+        run: Copy-Item -Path assets\windows\app_icon.ico -Destination windows\runner\resources\app_icon.ico -Force
+
+      - name: Build Windows release
+        run: flutter build windows --release
+
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: Build single installer exe
+        run: '& "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SJ-ACT-Setup
+          path: SJ-ACT-Setup.exe
