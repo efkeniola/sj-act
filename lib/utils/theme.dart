@@ -151,6 +151,22 @@ class AppTheme {
         textStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
       ),
     ),
+    // FilledButton has NO theme override without this block, so it falls
+    // back to Flutter's Material 3 default foreground (colorScheme.onPrimary).
+    // Because `primary` above is force-set to ActColors.primary/primaryLight
+    // instead of a seed-derived tone, Flutter's auto-computed onPrimary can
+    // resolve to a dark/near-black color — invisible on this app's red
+    // FilledButtons (e.g. the "Activate" button) especially in dark mode.
+    // Setting it explicitly here fixes every FilledButton in the app at once.
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+        foregroundColor: Colors.white,
+        elevation: 0,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+        textStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+      ),
+    ),
     outlinedButtonTheme: OutlinedButtonThemeData(
       style: OutlinedButton.styleFrom(
         foregroundColor: ActColors.primary,
@@ -210,6 +226,15 @@ class AppTheme {
     elevatedButtonTheme: ElevatedButtonThemeData(
       style: ElevatedButton.styleFrom(
         backgroundColor: ActColors.primaryLight,
+        foregroundColor: Colors.white,
+        elevation: 0,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+        textStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+      ),
+    ),
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
         foregroundColor: Colors.white,
         elevation: 0,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),

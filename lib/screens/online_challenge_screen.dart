@@ -67,6 +67,7 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
   Timer? _hostStartTimer;
   int _hostStartSecondsLeft = 120;
   bool _dailyUsageRecorded = false; // guards against double-counting a single match start
+  bool _trialUsageRecorded = false; // guards against double-counting the free-trial match
 
   final List<Map<String, dynamic>> _chatMessages = [];
   final _chatCtrl = TextEditingController();
@@ -154,7 +155,12 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
   void _startSearch() {
     if (_accessPauseUntil != null && _accessPauseUntil!.isAfter(DateTime.now())) return;
     if (_practiceRequired) return;
-    if (widget.trialMode) FreeTrialService.markOnlineTrialUsed();
+    // Trial usage is now recorded in _startMatch(), the moment the match
+    // actually begins — not here, when the user has merely tapped
+    // Start/Search. See the doc comment on _startMatch() for why: tapping
+    // Start doesn't guarantee an opponent is ever found or a match ever
+    // starts, so burning the trial here could cost the user their one
+    // free match for nothing.
     setState(() {
       _searching = true;
       _statusMsg = 'Connecting...';
@@ -394,6 +400,14 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
       _dailyUsageRecorded = true;
       DailyUsageService.recordOnlineUsage();
     }
+    // Same reasoning for the free-trial match: only burn it once the user
+    // is actually about to play (an opponent is confirmed and we're about
+    // to open the match screen), never at the earlier "Start/Search" tap —
+    // that tap doesn't guarantee an opponent is found.
+    if (widget.trialMode && !_trialUsageRecorded) {
+      _trialUsageRecorded = true;
+      FreeTrialService.markOnlineTrialUsed();
+    }
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
@@ -553,7 +567,7 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
                   label: Text('$n'),
                   selected: _questionCount == n,
                   selectedColor: ActColors.primary,
-                  labelStyle: TextStyle(color: _questionCount == n ? Colors.white : null, fontWeight: FontWeight.w600),
+                  labelStyle: TextStyle(color: _questionCount == n ? Colors.white : (context.isDark ? Colors.white : ActColors.charcoal), fontWeight: FontWeight.w600),
                   onSelected: (_) => setState(() => _questionCount = n),
                 )).toList()),
               ),
@@ -602,7 +616,7 @@ class _OnlineChallengeScreenState extends State<OnlineChallengeScreen> {
                       label: Text(_formatOnlineTimerLabel(n)),
                       selected: _questionTimerSeconds == n,
                       selectedColor: ActColors.primary,
-                      labelStyle: TextStyle(color: _questionTimerSeconds == n ? Colors.white : null, fontWeight: FontWeight.w600, fontSize: 12),
+                      labelStyle: TextStyle(color: _questionTimerSeconds == n ? Colors.white : (context.isDark ? Colors.white : ActColors.charcoal), fontWeight: FontWeight.w600, fontSize: 12),
                       onSelected: (_) => setState(() => _questionTimerSeconds = n),
                     )).toList()),
                   ],
@@ -2768,7 +2782,7 @@ class _ChatBox extends StatelessWidget {
                 border: isMe ? null : Border.all(color: isDark ? ActColors.darkBorder : ActColors.lightBorder),
               ),
               child: Text('${m['sender']}: ${m['text']}',
-                  style: TextStyle(fontSize: 11, color: isMe ? Colors.white : null)),
+                  style: TextStyle(fontSize: 11, color: isMe ? Colors.white : (isDark ? Colors.white : ActColors.charcoal))),
             ),
           );
         },
@@ -2812,7 +2826,7 @@ class _RoomCard extends StatelessWidget {
             child: Text(code, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: isSelected ? Colors.white : ActColors.midGray)),
           ),
           const SizedBox(height: 10),
-          Text(title, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: isSelected ? ActColors.primary : null)),
+          Text(title, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: isSelected ? ActColors.primary : (isDark ? Colors.white : ActColors.charcoal))),
           Text(subtitle, style: TextStyle(fontSize: 10, color: ActColors.midGray)),
         ]),
       ),

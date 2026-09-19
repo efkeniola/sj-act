@@ -237,7 +237,7 @@ class ActSectionCardWidget extends StatelessWidget {
             const Spacer(),
             Text(
               actSectionDisplayName(section),
-              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: isLocked ? ActColors.midGray : null),
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: isLocked ? ActColors.midGray : (isDark ? Colors.white : ActColors.charcoal)),
             ),
             const SizedBox(height: 2),
             Text(subtitle, style: TextStyle(fontSize: 10, color: ActColors.midGray)),

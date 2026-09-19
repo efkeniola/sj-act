@@ -26,9 +26,14 @@ class AppConstants {
   static const String codePrefixWifi     = "SJACT-WIFI";
   static const String codePrefixAll      = "SJACT-ALL";
 
-  static final RegExp codePattern = RegExp(
-    r'^(SJACTS|SJACT-ONLINE|SJACT-WIFI|SJACT-ALL)-\d{2}[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{2}$',
-  );
+  // Code detection is intentionally minimal: the only thing the app checks
+  // client-side is that the code starts with "SJACT" — everything else
+  // about whether it's a real, unused, valid code is decided by the
+  // activation server. This used to also validate the exact SJACTS-/
+  // SJACT-ONLINE-/SJACT-WIFI-/SJACT-ALL- structure (digits/letter counts,
+  // dash placement), but that extra client-side "detection" has been
+  // removed on purpose — the server is the single source of truth.
+  static final RegExp codePattern = RegExp(r'^SJACT', caseSensitive: false);
 
   // ── Categories ───────────────────────────────────────
   static const String catStandard = "standard";
@@ -168,6 +173,7 @@ class AppConstants {
       'Full ACT question bank across English, Math, Reading, and Science',
       'Score prediction, full syllabus, timetable, and progress analytics',
       'Built-in graphing calculator for the Math section',
+      'Includes 1 free daily Online Challenge match and 2 free daily WiFi Challenge matches',
     ],
     catOnlineChallenge: [
       'Unlimited matches against a simulated opponent — no daily cap',

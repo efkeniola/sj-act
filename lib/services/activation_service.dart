@@ -190,7 +190,24 @@ class ActivationService {
   }
 
   /// Check current status for a category — tries server first, falls back to cache.
+  ///
+  /// Intentionally NEVER auto-detects/auto-reactivates a previous
+  /// activation on a fresh install. It only ever asks the server about a
+  /// category if there's already a local cache record for it on THIS
+  /// install (i.e. the user activated it, on this install, at some point).
+  /// If there's no local record — e.g. right after a reinstall, when the
+  /// app's local database has been wiped — this returns null immediately
+  /// without contacting the server at all, even though the device ID
+  /// itself may still resolve to the same value as before (device IDs can
+  /// persist across a reinstall on some platforms). Two different people
+  /// can end up resolving to the same device ID in edge cases, so that ID
+  /// alone must never be trusted to silently restore someone's purchase —
+  /// activation is only ever restored by the user explicitly re-entering
+  /// their code (which redeem() handles as a normal, explicit reactivation).
   static Future<ActivationRecord?> getStatus(String category) async {
+    final existingLocalRecord = await DatabaseService.instance.getCachedActivation(category);
+    if (existingLocalRecord == null) return null;
+
     try {
       final deviceId = await DeviceService.getDeviceId();
       final result = await ApiService.get('/check-status/?device_id=$deviceId')

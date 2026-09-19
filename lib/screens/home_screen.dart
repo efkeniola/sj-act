@@ -1223,7 +1223,7 @@ class _SectionCard extends StatelessWidget {
               style: TextStyle(
                   fontWeight: FontWeight.w700,
                   fontSize: 13,
-                  color: isLocked ? ActColors.midGray : null)),
+                  color: isLocked ? ActColors.midGray : (isDark ? Colors.white : ActColors.charcoal))),
           const SizedBox(height: 2),
           Text(subtitle,
               style: TextStyle(fontSize: 10, color: ActColors.midGray)),
@@ -1327,7 +1327,7 @@ class _ToolChip extends StatelessWidget {
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
                   color: isLocked ? ActColors.midGray
-                      : (isHighlighted ? ActColors.accent : null))),
+                      : (isHighlighted ? ActColors.accent : (isDark ? Colors.white : ActColors.charcoal)))),
         ]),
       ),
     );

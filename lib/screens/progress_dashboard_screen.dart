@@ -316,7 +316,7 @@ class _OverviewTab extends StatelessWidget {
               Text('Target: $target',
                   style: TextStyle(
                       fontSize: 12,
-                      color: ActColors.primary,
+                      color: isDark ? ActColors.primaryLight : ActColors.primary,
                       fontWeight: FontWeight.w700)),
               const Spacer(),
               const Text('36',
@@ -338,7 +338,7 @@ class _OverviewTab extends StatelessWidget {
                       decoration: BoxDecoration(
                           border: Border(
                               right: BorderSide(
-                                  color: ActColors.primary, width: 2.5))))),
+                                  color: isDark ? ActColors.primaryLight : ActColors.primary, width: 2.5))))),
             ]),
             const SizedBox(height: 8),
             Text(_collegeRange(score),
@@ -491,7 +491,7 @@ class _SubjectDetailCardState extends State<_SubjectDetailCard> {
       case ActSection.science:
         return const Color(0xFF6A1B9A);
       default:
-        return ActColors.primary;
+        return widget.isDark ? ActColors.primaryLight : ActColors.primary;
     }
   }
 
@@ -812,7 +812,7 @@ class _SkillStatTile extends StatelessWidget {
       case ActSection.science:
         return const Color(0xFF6A1B9A);
       default:
-        return ActColors.primary;
+        return isDark ? ActColors.primaryLight : ActColors.primary;
     }
   }
 
@@ -1053,7 +1053,7 @@ class _StudyPlanTab extends StatelessWidget {
         'Focus on your weakest section',
         'Check score vs target'
       ],
-      color: ActColors.primary,
+      color: isDark ? ActColors.primaryLight : ActColors.primary,
       isDark: isDark,
     ));
     return plans;
@@ -1122,7 +1122,7 @@ class _StudyPlanTab extends StatelessWidget {
       case ActSection.science:
         return const Color(0xFF6A1B9A);
       default:
-        return ActColors.primary;
+        return isDark ? ActColors.primaryLight : ActColors.primary;
     }
   }
 }
@@ -1215,7 +1215,7 @@ class _TimelineRow extends StatelessWidget {
                   style: TextStyle(
                       fontSize: 10,
                       fontWeight: FontWeight.w800,
-                      color: ActColors.primary))),
+                      color: isDark ? ActColors.primaryLight : ActColors.primary))),
           const SizedBox(width: 8),
           Expanded(
               child: Text(text,
@@ -1244,7 +1244,7 @@ class _SectionBarRow extends StatelessWidget {
       case ActSection.science:
         return const Color(0xFF6A1B9A);
       default:
-        return ActColors.primary;
+        return isDark ? ActColors.primaryLight : ActColors.primary;
     }
   }
 
@@ -1293,7 +1293,7 @@ class _MiniStat extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
       decoration: _cardDecor(isDark),
       child: Column(children: [
-        Icon(icon, size: 18, color: ActColors.primary),
+        Icon(icon, size: 18, color: isDark ? ActColors.primaryLight : ActColors.primary),
         const SizedBox(height: 6),
         Text(value,
             style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),

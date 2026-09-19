@@ -461,7 +461,7 @@ class _ExamSetupDialogState extends State<_ExamSetupDialog> {
           selectedColor: ActColors.primary,
           labelStyle: TextStyle(
             fontWeight: FontWeight.w700,
-            color: selected ? Colors.white : (locked ? ActColors.midGray : null),
+            color: selected ? Colors.white : (locked ? ActColors.midGray : (context.isDark ? Colors.white : ActColors.charcoal)),
           ),
           onSelected: (_) {
             if (locked) {
@@ -846,7 +846,7 @@ class _RevealChip extends StatelessWidget {
             Icon(icon, size: 14, color: selected ? ActColors.primary : ActColors.midGray),
             const SizedBox(width: 5),
             Text(label, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12,
-              color: selected ? ActColors.primary : null)),
+              color: selected ? ActColors.primary : (isDark ? Colors.white : ActColors.charcoal))),
           ]),
           const SizedBox(height: 2),
           Text(sublabel, style: TextStyle(fontSize: 10, color: ActColors.midGray, height: 1.3)),

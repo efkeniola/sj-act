@@ -101,6 +101,7 @@ class WifiChallengeScreen extends StatefulWidget {
 class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTickerProviderStateMixin {
   late TabController _tab;
   bool _dailyUsageRecorded = false; // guards against double-counting a single match start
+  bool _trialUsageRecorded = false; // guards against double-counting the free-trial match
 
   // Host state
   Registration? _registration;
@@ -236,10 +237,11 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
       _showSnack('WiFi or Hotspot is off. Turn it on and make sure it\'s connected, then try again.');
       return;
     }
-    if (widget.trialMode) {
-      await FreeTrialService.markWifiHostTrialUsed();
-      if (mounted) setState(() => _trialHostUsed = true);
-    }
+    // Trial usage is recorded later, in _applyStartPayload(), the moment
+    // the match actually begins for this device — not here, when the user
+    // has merely tapped "Host". Hosting can still fail (network not ready,
+    // no one ever joins, etc.), so marking the trial used here could burn
+    // the user's one free match for nothing.
     try {
       // Bind to an OS-assigned free port (0) rather than a fixed hardcoded
       // one — a fixed port can fail to bind if anything else is using it
@@ -354,10 +356,11 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
       _showSnack('Your free trial join match has already been used.');
       return;
     }
-    if (widget.trialMode) {
-      await FreeTrialService.markWifiJoinTrialUsed();
-      if (mounted) setState(() => _trialJoinUsed = true);
-    }
+    // Trial usage is recorded later, in _applyStartPayload(), the moment
+    // the match actually begins for this device — not here, when the user
+    // has merely tapped "Join". The connection attempt below can still
+    // fail or time out, so marking the trial used here could burn the
+    // user's one free match for a match that never actually starts.
     // A WiFi connect attempt can fail transiently even on a perfectly fine
     // network (the host's listen socket not quite ready yet, a brief radio
     // hiccup) — a short retry-with-backoff makes that a non-issue instead
@@ -674,6 +677,21 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
     if (widget.countsAgainstDailyFree && !_dailyUsageRecorded) {
       _dailyUsageRecorded = true;
       DailyUsageService.recordWifiUsage();
+    }
+    // Same idea for the free-trial match: only burn the host or join trial
+    // slot the moment the match is actually starting for this device, not
+    // at the earlier "Host"/"Join" tap — those can still fail or find no
+    // one before a match ever begins. Whichever role this device is
+    // playing (host or joiner) only burns its own matching trial slot.
+    if (widget.trialMode && !_trialUsageRecorded) {
+      _trialUsageRecorded = true;
+      if (_hosting) {
+        FreeTrialService.markWifiHostTrialUsed();
+        if (mounted) setState(() => _trialHostUsed = true);
+      } else if (_joined) {
+        FreeTrialService.markWifiJoinTrialUsed();
+        if (mounted) setState(() => _trialJoinUsed = true);
+      }
     }
     _matchLaunched = true;
     final ids = (data['ids'] as List).cast<String>();
@@ -1100,7 +1118,7 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
                   label: Text('$n'),
                   selected: _questionCount == n,
                   selectedColor: ActColors.primary,
-                  labelStyle: TextStyle(color: _questionCount == n ? Colors.white : null, fontWeight: FontWeight.w600),
+                  labelStyle: TextStyle(color: _questionCount == n ? Colors.white : (context.isDark ? Colors.white : ActColors.charcoal), fontWeight: FontWeight.w600),
                   onSelected: (_) => setState(() => _questionCount = n),
                 )).toList(),
               ),
@@ -1126,7 +1144,7 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
               label: Text(_formatWifiTimerLabel(n)),
               selected: _questionTimerSeconds == n,
               selectedColor: ActColors.primary,
-              labelStyle: TextStyle(color: _questionTimerSeconds == n ? Colors.white : null, fontWeight: FontWeight.w600, fontSize: 12),
+              labelStyle: TextStyle(color: _questionTimerSeconds == n ? Colors.white : (context.isDark ? Colors.white : ActColors.charcoal), fontWeight: FontWeight.w600, fontSize: 12),
               onSelected: (_) => setState(() => _questionTimerSeconds = n),
             )).toList()),
             const SizedBox(height: 4),
@@ -1350,7 +1368,7 @@ class _WifiChallengeScreenState extends State<WifiChallengeScreen> with SingleTi
                                     color: isMe ? Colors.white70 : ActColors.midGray)),
                             const SizedBox(height: 2),
                             Text(m['text'] as String,
-                                style: TextStyle(fontSize: 13, color: isMe ? Colors.white : null)),
+                                style: TextStyle(fontSize: 13, color: isMe ? Colors.white : (isDark ? Colors.white : ActColors.charcoal))),
                           ],
                         ),
                       ),

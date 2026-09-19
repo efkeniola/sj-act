@@ -465,7 +465,7 @@ class _RevealOption extends StatelessWidget {
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(label, style: TextStyle(
             fontWeight: FontWeight.w700, fontSize: 13,
-            color: selected ? ActColors.primary : null)),
+            color: selected ? ActColors.primary : (isDark ? Colors.white : ActColors.charcoal))),
           const SizedBox(height: 2),
           Text(desc, style: TextStyle(fontSize: 10, color: ActColors.midGray, height: 1.3)),
         ]),
