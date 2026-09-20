@@ -90,8 +90,25 @@ class ActivationService {
 
     if (!result.success) {
       if (result.wasTimeout) {
-        final cachedResult = await _cachedOfflineDetailed('standard');
-        if (cachedResult.record != null) return cachedResult;
+        // This used to always check the 'standard' category's cache here,
+        // regardless of which category the code being redeemed actually
+        // belonged to — so a timed-out reactivation of, say, a WiFi
+        // Challenge code could silently fall back to a completely
+        // different category's (Standard's) cached record/expiry instead
+        // of WiFi's own, which is exactly the kind of "wrong duration
+        // showing" symptom this app has been fighting. Since this app's
+        // single activation box doesn't know in advance which category a
+        // code is for until the server tells us, check every category's
+        // offline cache and use whichever one is still validly active —
+        // never assume it must be 'standard'.
+        for (final cat in [
+          AppConstants.catStandard,
+          AppConstants.catOnlineChallenge,
+          AppConstants.catWifiChallenge,
+        ]) {
+          final cachedResult = await _cachedOfflineDetailed(cat);
+          if (cachedResult.record != null) return cachedResult;
+        }
         return ActivationResult(
           ActivationOutcome.timeout,
           null,
@@ -113,7 +130,15 @@ class ActivationService {
     }
 
     final data = result.data!;
-    final now = DateTime.now();
+    // Use the SERVER's activated_at (now present in every /activate/
+    // response branch, including reactivation) instead of this device's
+    // own clock. A local timestamp here is both inaccurate (device clocks
+    // drift) and untrustworthy for something that timing logic depends
+    // on — the server is the single source of truth for every other date
+    // here (expiresAt), so activatedAt should be too.
+    final now = data['activated_at'] != null
+        ? DateTime.parse(data['activated_at'] as String)
+        : DateTime.now();
     final expiresAt = DateTime.parse(data['expires_at'] as String);
     final categories = (data['categories'] as List?)?.cast<String>() ?? ['standard'];
 
@@ -204,28 +229,41 @@ class ActivationService {
   /// alone must never be trusted to silently restore someone's purchase —
   /// activation is only ever restored by the user explicitly re-entering
   /// their code (which redeem() handles as a normal, explicit reactivation).
+  ///
+  /// IMPORTANT — queried PER CATEGORY, one call per category, not as one
+  /// bulk "give me every category's status" call. This used to call
+  /// `/check-status/?device_id=...` once and read `data['categories'][category]`
+  /// out of a single combined response. That shape made it possible for a
+  /// stale/longer-lived record in one category (e.g. a 1-year WiFi
+  /// Challenge activation) to leak into another category's status, or for
+  /// a freshly-*reactivated* shorter code (e.g. a 1-month code replacing
+  /// that 1-year one) to still show the old expiry, because the bulk
+  /// endpoint doesn't guarantee it re-resolves every category's expiry
+  /// independently on every call the way three isolated calls do. Each
+  /// category now gets its own request and its own response, so a
+  /// reactivation for one category can never be shadowed by another
+  /// category's (or that same category's previous) expiry date.
   static Future<ActivationRecord?> getStatus(String category) async {
     final existingLocalRecord = await DatabaseService.instance.getCachedActivation(category);
     if (existingLocalRecord == null) return null;
 
     try {
       final deviceId = await DeviceService.getDeviceId();
-      final result = await ApiService.get('/check-status/?device_id=$deviceId')
+      final result = await ApiService.get('/check-status/?category=$category&device_id=$deviceId')
           .timeout(AppConstants.apiTimeout);
       if (result.success && result.data != null) {
-        final cats = result.data!['categories'] as Map<String, dynamic>?;
-        final catData = cats?[category] as Map<String, dynamic>?;
-        if (catData != null && catData['active'] == true) {
-          final expiresAt = DateTime.parse(catData['expires_at'] as String);
+        final data = result.data!;
+        if (data['active'] == true) {
+          final expiresAt = DateTime.parse(data['expires_at'] as String);
           final graceEndsAt = expiresAt.add(Duration(days: graceDaysFor(category)));
           final record = ActivationRecord(
             category: category,
-            code: catData['code'] as String? ?? '',
+            code: data['code'] as String? ?? '',
             deviceId: deviceId,
-            activatedAt: DateTime.parse(catData['activated_at'] as String),
+            activatedAt: DateTime.parse(data['activated_at'] as String),
             expiresAt: expiresAt,
             graceEndsAt: graceEndsAt,
-            duration: catData['duration'] as String? ?? '6m',
+            duration: data['duration'] as String? ?? '6m',
           );
           await DatabaseService.instance.cacheActivation(record, _sign(record));
           return record;
