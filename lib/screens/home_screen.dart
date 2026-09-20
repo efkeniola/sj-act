@@ -4,6 +4,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../data/motivation_data.dart';
 import '../data/questions_data.dart';
 import '../models/models.dart';
+import '../main.dart' show routeObserver;
 import '../services/activation_service.dart';
 import '../services/daily_usage_service.dart';
 import '../services/database_service.dart';
@@ -32,7 +33,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with RouteAware {
   String _displayName = 'there';
   bool _standardActive = false;
   bool _onlineActive = false;
@@ -53,6 +54,30 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    _load();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route is PageRoute) routeObserver.subscribe(this, route);
+  }
+
+  @override
+  void dispose() {
+    routeObserver.unsubscribe(this);
+    super.dispose();
+  }
+
+  @override
+  void didPopNext() {
+    // Fires when a screen pushed on top of Home (activation, an exam,
+    // a challenge match, settings, etc.) gets popped and Home becomes
+    // visible again — refresh here so activation status, daily free-try
+    // counts, streaks and progress reflect whatever changed while the
+    // user was away, instead of only ever being loaded once on first
+    // launch.
     _load();
   }
 

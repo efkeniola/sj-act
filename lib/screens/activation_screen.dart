@@ -30,7 +30,7 @@ class _ActivationScreenState extends State<ActivationScreen> {
   ActivationRecord? _standardRecord;
   ActivationRecord? _onlineRecord;
   ActivationRecord? _wifiRecord;
-  bool _loadingStatus = true;
+  bool _refreshing = false; // small inline indicator while (re)checking status — never blocks the screen
 
   @override
   void initState() {
@@ -39,7 +39,21 @@ class _ActivationScreenState extends State<ActivationScreen> {
   }
 
   Future<void> _loadAll() async {
-    setState(() => _loadingStatus = true);
+    // Deliberately never blocks the whole screen behind a spinner — not on
+    // first open, not on any later refresh. This screen is recreated fresh
+    // every time it's navigated to, so "only block on the very first load"
+    // doesn't actually help here: every visit IS a first load for a brand
+    // new instance of this screen. So instead, the status cards render
+    // immediately from whatever's already known (starts as "Not
+    // activated" placeholders, same as SAT's activation screen does) and
+    // this quietly fills them in via `_refreshing`'s thin progress bar
+    // once the check finishes. Blocking behind a spinner every visit used
+    // to actively mislead: while a slow/flaky connection kept that
+    // spinner up, an already-unlocked category could flash "locked" the
+    // instant it resolved, because the real cards (and their correct,
+    // last-known state) were hidden the whole time instead of just
+    // quietly being confirmed or corrected in place.
+    setState(() => _refreshing = true);
     final profile = await UserProfileService.getSavedProfile();
     if (profile != null) {
       _nameCtrl.text = profile.fullName;
@@ -52,7 +66,7 @@ class _ActivationScreenState extends State<ActivationScreen> {
       _standardRecord = statuses[AppConstants.catStandard];
       _onlineRecord   = statuses[AppConstants.catOnlineChallenge];
       _wifiRecord     = statuses[AppConstants.catWifiChallenge];
-      _loadingStatus  = false;
+      _refreshing     = false;
     });
   }
 
@@ -101,10 +115,18 @@ class _ActivationScreenState extends State<ActivationScreen> {
             onPressed: _openStore,
           ),
         ],
+        // Thin bar instead of blanking the screen — a quiet "still syncing"
+        // signal for any refresh after the first one, so the status cards
+        // stay visible (and correct, from the last successful check) the
+        // whole time instead of disappearing behind a spinner.
+        bottom: _refreshing
+            ? const PreferredSize(
+                preferredSize: Size.fromHeight(2),
+                child: LinearProgressIndicator(minHeight: 2),
+              )
+            : null,
       ),
-      body: _loadingStatus
-          ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
+      body: SingleChildScrollView(
               padding: const EdgeInsets.all(20),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,

@@ -4,6 +4,12 @@ import 'package:flutter/services.dart';
 import 'utils/theme.dart';
 import 'screens/splash_screen.dart';
 
+// Shared by any screen that needs to know when it's become visible again
+// after a screen pushed on top of it was popped — HomeScreen uses this to
+// refresh its activation/trial/progress state every time the user comes
+// back to it, instead of only ever loading it once on first launch.
+final RouteObserver<PageRoute> routeObserver = RouteObserver<PageRoute>();
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await loadSavedDarkMode();
@@ -31,6 +37,7 @@ class SjActApp extends StatelessWidget {
           theme: AppTheme.light,
           darkTheme: AppTheme.dark,
           themeMode: isDark ? ThemeMode.dark : ThemeMode.light,
+          navigatorObservers: [routeObserver],
           home: const SplashScreen(),
         );
       },
