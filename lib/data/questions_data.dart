@@ -1,7 +1,8 @@
 import 'dart:convert';
+import 'dart:io' show gzip;
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/foundation.dart' show compute, debugPrint;
 import 'package:flutter/services.dart' show rootBundle;
 
 import '../models/models.dart';
@@ -12,12 +13,16 @@ import '../models/models.dart';
 /// 215), 21,500 questions in total.
 ///
 /// All of it lives in ONE bundled data file — assets/data/act_question_bank
-/// .json — instead of the 100 separate source files it was generated from,
-/// and instead of being hand-written here as Dart const literals. A 100-set
-/// const literal would be tens of megabytes of Dart source, which is not
-/// something the analyzer/compiler handles gracefully; loading one JSON
-/// asset at startup is the version of "everything in one file" that
-/// actually keeps the app fast to build and run.
+/// .json.gz — instead of the 100 separate source files it was generated
+/// from, and instead of being hand-written here as Dart const literals. A
+/// 100-set const literal would be tens of megabytes of Dart source, which
+/// is not something the analyzer/compiler handles gracefully; loading one
+/// JSON asset at startup is the version of "everything in one file" that
+/// actually keeps the app fast to build and run. It's gzip-compressed
+/// (JSON text compresses ~9x) so it stays well under GitHub's 25MB
+/// web-upload limit and shrinks the app's own footprint, and it's
+/// decompressed on the same background isolate that parses it, so that
+/// costs the UI thread nothing either.
 ///
 /// QuestionBank.ensureLoaded() is called once, at startup, from
 /// splash_screen.dart, before the person can reach any screen that needs
@@ -31,7 +36,7 @@ import '../models/models.dart';
 class QuestionBank {
   QuestionBank._();
 
-  static const String assetPath = 'assets/data/act_question_bank.json';
+  static const String assetPath = 'assets/data/act_question_bank.json.gz';
 
   static Map<int, Map<ActSection, List<ActQuestion>>> _sets = {};
   static List<int> _availableSetNumbers = const [];
@@ -49,28 +54,39 @@ class QuestionBank {
     return _loadingFuture ??= _load();
   }
 
+  /// Set when [_load] fails, so the picker/exam screens can show *why*
+  /// instead of a bare empty state. Null when loading succeeded (or
+  /// hasn't been attempted yet).
+  static String? loadError;
+
   static Future<void> _load() async {
     try {
       // Only the raw byte read happens on the UI isolate (fast disk I/O,
-      // no CPU work). The UTF-8 decode, JSON parse, and object building —
-      // the actually expensive parts, for a 60MB file — all happen inside
-      // `compute`'s background isolate instead. Previously the string was
-      // decoded on the main isolate before being handed off, which meant
-      // a real chunk of the work still ran on the UI thread; passing raw
-      // bytes across removes that entirely, so the UI never has a reason
-      // to stutter while this loads.
+      // no CPU work). Gunzipping, the UTF-8 decode, JSON parse, and
+      // object building — the actually expensive parts — all happen
+      // inside `compute`'s background isolate instead, so the UI thread
+      // never has a reason to stutter while this loads.
       final ByteData byteData = await rootBundle.load(assetPath);
       final Uint8List bytes = byteData.buffer.asUint8List(
           byteData.offsetInBytes, byteData.lengthInBytes);
       final parsed = await compute(_parseQuestionBank, bytes);
       _sets = parsed.sets;
       _availableSetNumbers = parsed.setNumbers;
-    } catch (e) {
-      // Corrupt/missing asset: leave the bank empty rather than crashing
-      // app startup. Screens that need question data will just show an
-      // empty state (e.g. "No sections selected") instead of hanging.
+      loadError = null;
+      debugPrint('QuestionBank: loaded ${_sets.length} sets '
+          '(${_sets.values.fold<int>(0, (t, s) => t + s.values.fold<int>(0, (t2, l) => t2 + l.length))} questions).');
+    } catch (e, st) {
+      // Don't crash app startup over a bad asset — but DO surface exactly
+      // what went wrong (asset missing from the bundle because pubspec
+      // wasn't picked up, corrupt gzip, malformed JSON, etc). Silently
+      // leaving this empty is what makes "no questions available" so
+      // confusing to debug from the UI alone — this print is what you'd
+      // look for in `flutter run`'s console output.
+      debugPrint('QuestionBank FAILED TO LOAD: $e');
+      debugPrint('$st');
       _sets = {};
       _availableSetNumbers = const [];
+      loadError = e.toString();
     } finally {
       _loaded = true;
     }
@@ -91,10 +107,11 @@ class _ParsedBank {
 /// Runs on a background isolate via `compute` — must be a top-level (or
 /// static) function, and everything it returns must be safe to send
 /// across the isolate boundary (plain data classes and enums are fine).
-/// Takes raw bytes (not a decoded String) so the UTF-8 decode also runs
-/// here, off the UI thread, rather than on the caller's isolate.
-_ParsedBank _parseQuestionBank(Uint8List bytes) {
-  final String raw = utf8.decode(bytes);
+/// Takes the raw gzip-compressed bytes (not decoded text) so gunzipping,
+/// UTF-8 decoding, and JSON parsing all run here, off the UI thread.
+_ParsedBank _parseQuestionBank(Uint8List gzippedBytes) {
+  final List<int> jsonBytes = gzip.decode(gzippedBytes);
+  final String raw = utf8.decode(jsonBytes);
   final Map<String, dynamic> decoded = json.decode(raw) as Map<String, dynamic>;
   final List<dynamic> setsJson = decoded['sets'] as List<dynamic>;
 

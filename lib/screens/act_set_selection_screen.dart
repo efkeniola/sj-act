@@ -84,6 +84,12 @@ class _ActSetSelectionScreenState extends State<ActSetSelectionScreen> {
         ? availableSetNumbers
         : List<int>.generate(100, (i) => i + 1);
 
+    // If the question bank actually failed to load, every tile here would
+    // otherwise look perfectly normal and only fail once the person taps
+    // "Start Exam" — surface the real problem right here instead, before
+    // they pick a set and hit a dead end.
+    final bankError = QuestionBank.loadError;
+
     final query = _query.trim();
     final filtered = query.isEmpty
         ? all
@@ -98,6 +104,31 @@ class _ActSetSelectionScreenState extends State<ActSetSelectionScreen> {
       body: SafeArea(
         child: Column(
           children: [
+            if (bankError != null)
+              Container(
+                width: double.infinity,
+                margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.red.withOpacity(isDark ? 0.16 : 0.08),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.red.withOpacity(0.4)),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.error_outline, size: 18, color: Colors.red),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Question data failed to load, so sets shown below won\'t '
+                        'actually have questions yet:\n$bankError',
+                        style: const TextStyle(fontSize: 12, color: Colors.red, height: 1.3),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
               child: TextField(

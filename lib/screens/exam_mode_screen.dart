@@ -264,8 +264,29 @@ class _ExamModeScreenState extends State<ExamModeScreen> {
     }
 
     if (sections.isEmpty) {
+      final noneSelected = !settings.includeEnglish &&
+          !settings.includeMath &&
+          !settings.includeReading &&
+          !settings.includeScience;
+      String msg;
+      if (noneSelected) {
+        // The genuine "you didn't pick any subject" case.
+        msg = 'No sections selected. Please select at least one section.';
+      } else {
+        // At least one subject was picked but came back with zero
+        // questions for this set — almost always means the question bank
+        // itself failed to load (bad/missing asset), not that this
+        // particular set has no data, so say that instead of the
+        // confusing generic message.
+        final err = QuestionBank.loadError;
+        msg = err != null
+            ? 'Question data failed to load: $err'
+            : (!QuestionBank.isLoaded
+                ? 'Question data is still loading — please wait a moment and try again.'
+                : 'No questions found for ACT $_selectedSet. Try a different set.');
+      }
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No sections selected. Please select at least one section.')),
+        SnackBar(content: Text(msg), duration: const Duration(seconds: 5)),
       );
       return;
     }
