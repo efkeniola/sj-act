@@ -55,14 +55,6 @@ class AppConstants {
   // behind Standard activation once testing is done.
   static const bool tempUnlockLeaderboard = false;
 
-  // Same idea, for Standard activation itself — while true, the Full
-  // Practice Exam and every Practice Section (and every ACT 1–100 set,
-  // not just ACT 1) are unlocked for everyone regardless of activation
-  // status, so the new 100-set question bank can be tested end-to-end
-  // (including on flutlab.io) without an activation code. Set this back
-  // to `false` before shipping to re-lock sets 2–100 behind activation.
-  static const bool tempUnlockStandard = true;
-
   // ── Store / Support ──────────────────────────────────
   static const String codeStoreUrl = "https://smartjamb.com/act-app/";
   static const String supportEmail = "smartjamb8505@gmail.com";

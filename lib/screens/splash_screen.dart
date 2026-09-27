@@ -27,12 +27,15 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
   }
 
   Future<void> _navigate() async {
-    // Load all 100 ACT question sets (21,500 questions) off the UI thread
-    // in parallel with the splash animation delay, so by the time this
-    // screen is ready to hand off, every set is already in memory and no
-    // screen anywhere in the app has to wait on it again.
+    // Load the question-bank INDEX (a lightweight list of 100 raw JSON
+    // strings, not 21,500 built questions — see questions_data.dart) in
+    // parallel with the splash animation. Because that index load is now
+    // genuinely fast (no per-question object building happens until a
+    // set is actually opened), the floor here only needs to cover the
+    // logo's own fade-in (900ms) rather than padding out an artificially
+    // long wait the way a slower, eager load used to require.
     await Future.wait([
-      Future.delayed(const Duration(milliseconds: 1800)),
+      Future.delayed(const Duration(milliseconds: 900)),
       QuestionBank.ensureLoaded(),
     ]);
     if (!mounted) return;

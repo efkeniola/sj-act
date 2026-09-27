@@ -14,30 +14,30 @@ import '../models/models.dart';
 ///
 /// All of it lives in ONE bundled data file — assets/data/act_question_bank
 /// .b64.txt — instead of the 100 separate source files it was generated
-/// from, and instead of being hand-written here as Dart const literals. A
-/// 100-set const literal would be tens of megabytes of Dart source, which
-/// is not something the analyzer/compiler handles gracefully; loading one
-/// JSON asset at startup is the version of "everything in one file" that
-/// actually keeps the app fast to build and run.
+/// from, and instead of being hand-written here as Dart const literals.
+/// The file is plain-text base64 of gzip-compressed JSON (not a raw binary
+/// .gz): some web-based build/upload pipelines mangle binary files in
+/// transit, while plain ASCII text survives untouched.
 ///
-/// The file is plain-text base64 of gzip-compressed JSON, not a raw binary
-/// .gz — some web-based build/upload pipelines (browser file uploaders,
-/// certain CI systems) mangle binary files in transit (line-ending
-/// translation, truncation) while leaving plain ASCII text untouched, so
-/// this is the format that survives any upload path reliably. It costs
-/// ~33% extra size over raw gzip bytes (9.7MB vs 7.3MB here) in exchange
-/// for that reliability, and is still ~85% smaller than the original
-/// uncompressed JSON (60.2MB). Decoding, decompressing, and parsing all
-/// happen on the same background isolate, so none of that costs the UI
-/// thread anything either.
+/// LAZY PER-SET LOADING — this is what keeps startup fast even with 100
+/// sets bundled: the outer JSON doesn't nest each set's 215 questions as
+/// real objects. Each set's data is stored as its own already-encoded JSON
+/// *string* (see convert step), so the one-time startup parse only has to
+/// tokenize 100 short string values — it never builds a single ActQuestion.
+/// A specific set's ~215 questions are only decoded and built the first
+/// time that set is actually opened (forSet), then cached. So opening the
+/// app costs "read the index," not "parse and build all 21,500 questions
+/// up front" — the thing that made the original eager-build design take
+/// several seconds (or worse on constrained web/JS runtimes, where
+/// `compute`'s background isolate has to message the ENTIRE built object
+/// graph back to the UI isolate — expensive for 21,500 objects, cheap for
+/// 100 strings).
 ///
 /// QuestionBank.ensureLoaded() is called once, at startup, from
-/// splash_screen.dart, before the person can reach any screen that needs
-/// question data. The heavy JSON decode + object-building work happens on
-/// a background isolate (via `compute`) so it never blocks the UI thread.
-/// Every existing call site (questionsForSection, questionsForRandomMix)
-/// keeps the exact same signature it always had, so nothing else in the
-/// app needs to change to keep working.
+/// splash_screen.dart — it only does the lightweight index parse. Every
+/// existing call site (questionsForSection, questionsForRandomMix) keeps
+/// the exact same signature it always had, so nothing else in the app
+/// needs to change to keep working.
 /// ───────────────────────────────────────────────────────────────────────
 
 class QuestionBank {
@@ -45,14 +45,27 @@ class QuestionBank {
 
   static const String assetPath = 'assets/data/act_question_bank.b64.txt';
 
-  static Map<int, Map<ActSection, List<ActQuestion>>> _sets = {};
+  // The lightweight index: each set's still-encoded JSON string, keyed by
+  // set number. Populated once by ensureLoaded(). Cheap to hold in memory
+  // (it's just text) even for all 100 sets.
+  static Map<int, String> _rawSetJson = {};
   static List<int> _availableSetNumbers = const [];
   static bool _loaded = false;
   static Future<void>? _loadingFuture;
 
-  /// True once the bank has finished loading (or failed and given up —
+  // Per-set BUILT question cache — populated lazily, the first time each
+  // set's questions are actually needed, and kept afterward so re-opening
+  // the same set is instant.
+  static final Map<int, Map<ActSection, List<ActQuestion>>> _builtSets = {};
+
+  /// True once the index has finished loading (or failed and given up —
   /// either way, callers can stop showing a loading spinner).
   static bool get isLoaded => _loaded;
+
+  /// Set when [_load] fails, so the picker/exam screens can show *why*
+  /// instead of a bare empty state. Null when loading succeeded (or
+  /// hasn't been attempted yet).
+  static String? loadError;
 
   /// Call once at app startup. Safe to call more than once or from more
   /// than one place — later calls just await the same load.
@@ -61,28 +74,22 @@ class QuestionBank {
     return _loadingFuture ??= _load();
   }
 
-  /// Set when [_load] fails, so the picker/exam screens can show *why*
-  /// instead of a bare empty state. Null when loading succeeded (or
-  /// hasn't been attempted yet).
-  static String? loadError;
-
   static Future<void> _load() async {
     try {
       // Load as text (rootBundle.loadString), not bytes — this asset is
       // plain base64 ASCII specifically so the read-and-bundle path never
-      // touches it as binary data. Only that text read happens on the UI
-      // isolate (fast, no real CPU cost); the base64 decode, gunzip,
-      // UTF-8 decode, JSON parse, and object building — the actually
-      // expensive parts — all happen inside `compute`'s background
-      // isolate instead, so the UI thread never has a reason to stutter
-      // while this loads.
+      // touches it as binary data. The base64 decode, gunzip, UTF-8
+      // decode, and JSON parse of the OUTER structure happen inside
+      // `compute`'s background isolate; because that outer parse only
+      // produces 100 short strings (not 21,500 built objects), the result
+      // is cheap to send back across the isolate boundary too.
       final String base64Text = await rootBundle.loadString(assetPath);
-      final parsed = await compute(_parseQuestionBank, base64Text);
-      _sets = parsed.sets;
+      final parsed = await compute(_parseIndex, base64Text);
+      _rawSetJson = parsed.rawSetJson;
       _availableSetNumbers = parsed.setNumbers;
       loadError = null;
-      debugPrint('QuestionBank: loaded ${_sets.length} sets '
-          '(${_sets.values.fold<int>(0, (t, s) => t + s.values.fold<int>(0, (t2, l) => t2 + l.length))} questions).');
+      debugPrint('QuestionBank: index ready for ${_availableSetNumbers.length} '
+          'sets (each set\'s questions build on first open).');
     } catch (e, st) {
       // Don't crash app startup over a bad asset — but DO surface exactly
       // what went wrong (asset missing from the bundle because pubspec
@@ -92,7 +99,7 @@ class QuestionBank {
       // you'd look for in `flutter run`'s console output.
       debugPrint('QuestionBank FAILED TO LOAD: $e');
       debugPrint('$st');
-      _sets = {};
+      _rawSetJson = {};
       _availableSetNumbers = const [];
       loadError = e.toString();
     } finally {
@@ -100,25 +107,40 @@ class QuestionBank {
     }
   }
 
-  static Map<ActSection, List<ActQuestion>>? forSet(int setNumber) => _sets[setNumber];
+  /// Returns the built questions for [setNumber], building and caching
+  /// them from that set's raw JSON the first time it's asked for. This
+  /// runs synchronously, directly on the calling isolate: parsing ~215
+  /// questions' worth of JSON takes low single-digit milliseconds, so
+  /// there's no need to hop to a background isolate for it the way the
+  /// (much bigger) startup index load does.
+  static Map<ActSection, List<ActQuestion>>? forSet(int setNumber) {
+    final cached = _builtSets[setNumber];
+    if (cached != null) return cached;
+
+    final raw = _rawSetJson[setNumber];
+    if (raw == null) return null;
+
+    final built = _buildSetFromRawJson(setNumber, raw);
+    _builtSets[setNumber] = built;
+    return built;
+  }
 
   /// Set numbers available in the app, in display order (1, 2, 3 ... 100).
   static List<int> get availableSetNumbers => _availableSetNumbers;
 }
 
-class _ParsedBank {
-  final Map<int, Map<ActSection, List<ActQuestion>>> sets;
+class _ParsedIndex {
+  final Map<int, String> rawSetJson;
   final List<int> setNumbers;
-  _ParsedBank(this.sets, this.setNumbers);
+  _ParsedIndex(this.rawSetJson, this.setNumbers);
 }
 
 /// Runs on a background isolate via `compute` — must be a top-level (or
-/// static) function, and everything it returns must be safe to send
-/// across the isolate boundary (plain data classes and enums are fine).
-/// Takes the raw base64 text (not already-decoded bytes) so the base64
-/// decode, gunzip, UTF-8 decode, and JSON parse all run here, off the UI
-/// thread.
-_ParsedBank _parseQuestionBank(String base64Text) {
+/// static) function. Only decodes the OUTER structure (base64 → gunzip →
+/// UTF-8 → JSON), which is just an index of 100 raw JSON strings — it
+/// deliberately does NOT parse any individual set's questions, so this
+/// stays fast regardless of how many sets are bundled.
+_ParsedIndex _parseIndex(String base64Text) {
   final Uint8List gzippedBytes = base64.decode(base64Text.trim());
   // Pure-Dart gzip decode (package:archive) instead of dart:io's gzip —
   // works on every compile target, including web/JS, where dart:io's
@@ -127,44 +149,51 @@ _ParsedBank _parseQuestionBank(String base64Text) {
   final List<int> jsonBytes = GZipDecoder().decodeBytes(gzippedBytes);
   final String raw = utf8.decode(jsonBytes);
   final Map<String, dynamic> decoded = json.decode(raw) as Map<String, dynamic>;
-  final List<dynamic> setsJson = decoded['sets'] as List<dynamic>;
 
-  final Map<int, Map<ActSection, List<ActQuestion>>> built = {};
+  final List<dynamic> setNumbersJson = decoded['setNumbers'] as List<dynamic>;
+  final List<dynamic> setsRawJson = decoded['setsRaw'] as List<dynamic>;
 
-  for (final entry in setsJson) {
-    final setMap = entry as Map<String, dynamic>;
-    final int setNumber = setMap['setNumber'] as int;
-    final List<dynamic> questionsJson = setMap['questions'] as List<dynamic>;
-
-    final Map<ActSection, List<ActQuestion>> bySection = {
-      ActSection.english: <ActQuestion>[],
-      ActSection.math: <ActQuestion>[],
-      ActSection.reading: <ActQuestion>[],
-      ActSection.science: <ActQuestion>[],
-    };
-
-    for (final q in questionsJson) {
-      final m = q as Map<String, dynamic>;
-      final section = actSectionFromString(m['section'] as String);
-      bySection[section]!.add(ActQuestion(
-        id: m['id'] as String,
-        setNumber: setNumber,
-        section: section,
-        skillArea: (m['skillArea'] as String?) ?? '',
-        difficulty: difficultyFromString((m['difficulty'] as String?) ?? 'medium'),
-        questionText: m['questionText'] as String,
-        passageText: m['passageText'] as String?,
-        options: List<String>.from(m['options'] as List),
-        correctAnswer: m['correctAnswer'] as String,
-        explanation: (m['explanation'] as String?) ?? '',
-      ));
-    }
-
-    built[setNumber] = bySection;
+  final Map<int, String> rawMap = {};
+  for (var i = 0; i < setNumbersJson.length; i++) {
+    rawMap[setNumbersJson[i] as int] = setsRawJson[i] as String;
   }
 
-  final setNumbers = built.keys.toList()..sort();
-  return _ParsedBank(built, setNumbers);
+  final setNumbers = rawMap.keys.toList()..sort();
+  return _ParsedIndex(rawMap, setNumbers);
+}
+
+/// Parses ONE set's raw JSON string into its built questions, grouped by
+/// section. Only ever does 215 questions' worth of work, never all 100
+/// sets' worth — that's the whole point of the lazy design above.
+Map<ActSection, List<ActQuestion>> _buildSetFromRawJson(int setNumber, String raw) {
+  final Map<String, dynamic> setMap = json.decode(raw) as Map<String, dynamic>;
+  final List<dynamic> questionsJson = setMap['questions'] as List<dynamic>;
+
+  final Map<ActSection, List<ActQuestion>> bySection = {
+    ActSection.english: <ActQuestion>[],
+    ActSection.math: <ActQuestion>[],
+    ActSection.reading: <ActQuestion>[],
+    ActSection.science: <ActQuestion>[],
+  };
+
+  for (final q in questionsJson) {
+    final m = q as Map<String, dynamic>;
+    final section = actSectionFromString(m['section'] as String);
+    bySection[section]!.add(ActQuestion(
+      id: m['id'] as String,
+      setNumber: setNumber,
+      section: section,
+      skillArea: (m['skillArea'] as String?) ?? '',
+      difficulty: difficultyFromString((m['difficulty'] as String?) ?? 'medium'),
+      questionText: m['questionText'] as String,
+      passageText: m['passageText'] as String?,
+      options: List<String>.from(m['options'] as List),
+      correctAnswer: m['correctAnswer'] as String,
+      explanation: (m['explanation'] as String?) ?? '',
+    ));
+  }
+
+  return bySection;
 }
 
 /// Set numbers available in the app, in display order (ACT 1..ACT 100).
