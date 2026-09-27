@@ -50,6 +50,15 @@ dependencies:
   in_app_purchase: ^3.2.3
   in_app_purchase_android: ^0.4.0+5
 
+  # Pure-Dart gzip/zlib decode for the ACT question bank asset. dart:io's
+  # gzip codec only works on the VM (it's backed by native zlib) and
+  # throws "Unsupported operation: _newZLibInflateFilter" wherever there's
+  # no native binding — notably on web/JS builds, which is exactly what
+  # some online build services (e.g. flutlab.io) compile to even for a
+  # "mobile" preview. This package decodes gzip in plain Dart, so it works
+  # identically on every target.
+  archive: ^3.6.1
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

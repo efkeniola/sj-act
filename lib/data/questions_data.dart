@@ -1,7 +1,7 @@
 import 'dart:convert';
-import 'dart:io' show gzip;
 import 'dart:typed_data';
 
+import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart' show compute, debugPrint;
 import 'package:flutter/services.dart' show rootBundle;
 
@@ -13,16 +13,23 @@ import '../models/models.dart';
 /// 215), 21,500 questions in total.
 ///
 /// All of it lives in ONE bundled data file — assets/data/act_question_bank
-/// .json.gz — instead of the 100 separate source files it was generated
+/// .b64.txt — instead of the 100 separate source files it was generated
 /// from, and instead of being hand-written here as Dart const literals. A
 /// 100-set const literal would be tens of megabytes of Dart source, which
 /// is not something the analyzer/compiler handles gracefully; loading one
 /// JSON asset at startup is the version of "everything in one file" that
-/// actually keeps the app fast to build and run. It's gzip-compressed
-/// (JSON text compresses ~9x) so it stays well under GitHub's 25MB
-/// web-upload limit and shrinks the app's own footprint, and it's
-/// decompressed on the same background isolate that parses it, so that
-/// costs the UI thread nothing either.
+/// actually keeps the app fast to build and run.
+///
+/// The file is plain-text base64 of gzip-compressed JSON, not a raw binary
+/// .gz — some web-based build/upload pipelines (browser file uploaders,
+/// certain CI systems) mangle binary files in transit (line-ending
+/// translation, truncation) while leaving plain ASCII text untouched, so
+/// this is the format that survives any upload path reliably. It costs
+/// ~33% extra size over raw gzip bytes (9.7MB vs 7.3MB here) in exchange
+/// for that reliability, and is still ~85% smaller than the original
+/// uncompressed JSON (60.2MB). Decoding, decompressing, and parsing all
+/// happen on the same background isolate, so none of that costs the UI
+/// thread anything either.
 ///
 /// QuestionBank.ensureLoaded() is called once, at startup, from
 /// splash_screen.dart, before the person can reach any screen that needs
@@ -36,7 +43,7 @@ import '../models/models.dart';
 class QuestionBank {
   QuestionBank._();
 
-  static const String assetPath = 'assets/data/act_question_bank.json.gz';
+  static const String assetPath = 'assets/data/act_question_bank.b64.txt';
 
   static Map<int, Map<ActSection, List<ActQuestion>>> _sets = {};
   static List<int> _availableSetNumbers = const [];
@@ -61,15 +68,16 @@ class QuestionBank {
 
   static Future<void> _load() async {
     try {
-      // Only the raw byte read happens on the UI isolate (fast disk I/O,
-      // no CPU work). Gunzipping, the UTF-8 decode, JSON parse, and
-      // object building — the actually expensive parts — all happen
-      // inside `compute`'s background isolate instead, so the UI thread
-      // never has a reason to stutter while this loads.
-      final ByteData byteData = await rootBundle.load(assetPath);
-      final Uint8List bytes = byteData.buffer.asUint8List(
-          byteData.offsetInBytes, byteData.lengthInBytes);
-      final parsed = await compute(_parseQuestionBank, bytes);
+      // Load as text (rootBundle.loadString), not bytes — this asset is
+      // plain base64 ASCII specifically so the read-and-bundle path never
+      // touches it as binary data. Only that text read happens on the UI
+      // isolate (fast, no real CPU cost); the base64 decode, gunzip,
+      // UTF-8 decode, JSON parse, and object building — the actually
+      // expensive parts — all happen inside `compute`'s background
+      // isolate instead, so the UI thread never has a reason to stutter
+      // while this loads.
+      final String base64Text = await rootBundle.loadString(assetPath);
+      final parsed = await compute(_parseQuestionBank, base64Text);
       _sets = parsed.sets;
       _availableSetNumbers = parsed.setNumbers;
       loadError = null;
@@ -78,10 +86,10 @@ class QuestionBank {
     } catch (e, st) {
       // Don't crash app startup over a bad asset — but DO surface exactly
       // what went wrong (asset missing from the bundle because pubspec
-      // wasn't picked up, corrupt gzip, malformed JSON, etc). Silently
-      // leaving this empty is what makes "no questions available" so
-      // confusing to debug from the UI alone — this print is what you'd
-      // look for in `flutter run`'s console output.
+      // wasn't picked up, corrupt base64/gzip, malformed JSON, etc).
+      // Silently leaving this empty is what makes "no questions available"
+      // so confusing to debug from the UI alone — this print is what
+      // you'd look for in `flutter run`'s console output.
       debugPrint('QuestionBank FAILED TO LOAD: $e');
       debugPrint('$st');
       _sets = {};
@@ -107,10 +115,16 @@ class _ParsedBank {
 /// Runs on a background isolate via `compute` — must be a top-level (or
 /// static) function, and everything it returns must be safe to send
 /// across the isolate boundary (plain data classes and enums are fine).
-/// Takes the raw gzip-compressed bytes (not decoded text) so gunzipping,
-/// UTF-8 decoding, and JSON parsing all run here, off the UI thread.
-_ParsedBank _parseQuestionBank(Uint8List gzippedBytes) {
-  final List<int> jsonBytes = gzip.decode(gzippedBytes);
+/// Takes the raw base64 text (not already-decoded bytes) so the base64
+/// decode, gunzip, UTF-8 decode, and JSON parse all run here, off the UI
+/// thread.
+_ParsedBank _parseQuestionBank(String base64Text) {
+  final Uint8List gzippedBytes = base64.decode(base64Text.trim());
+  // Pure-Dart gzip decode (package:archive) instead of dart:io's gzip —
+  // works on every compile target, including web/JS, where dart:io's
+  // native-zlib-backed decoder throws
+  // "Unsupported operation: _newZLibInflateFilter".
+  final List<int> jsonBytes = GZipDecoder().decodeBytes(gzippedBytes);
   final String raw = utf8.decode(jsonBytes);
   final Map<String, dynamic> decoded = json.decode(raw) as Map<String, dynamic>;
   final List<dynamic> setsJson = decoded['sets'] as List<dynamic>;
