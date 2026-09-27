@@ -220,10 +220,18 @@ class _ExamModeScreenState extends State<ExamModeScreen> {
   }
 
   void _launchExam(ExamSettings settings) {
+    // A single Random shared across every section fetched below, so the
+    // whole exam gets one freshly-randomized shuffle per attempt (not
+    // re-seeded per section) — question order AND each question's
+    // A/B/C/D order are both reshuffled here; correctAnswer is
+    // recalculated to match, so grading needs no changes anywhere else.
+    final rng = Random();
+
     // Build section list
     final sections = <_ExamSection>[];
     if (settings.includeEnglish) {
-      final qs = questionsForSection(ActSection.english, setNumber: _selectedSet);
+      final qs = randomizeForExamAttempt(
+          questionsForSection(ActSection.english, setNumber: _selectedSet), rng);
       if (qs.isNotEmpty) {
         sections.add(_ExamSection(
           section: ActSection.english,
@@ -233,7 +241,8 @@ class _ExamModeScreenState extends State<ExamModeScreen> {
       }
     }
     if (settings.includeMath) {
-      final qs = questionsForSection(ActSection.math, setNumber: _selectedSet);
+      final qs = randomizeForExamAttempt(
+          questionsForSection(ActSection.math, setNumber: _selectedSet), rng);
       if (qs.isNotEmpty) {
         sections.add(_ExamSection(
           section: ActSection.math,
@@ -243,7 +252,8 @@ class _ExamModeScreenState extends State<ExamModeScreen> {
       }
     }
     if (settings.includeReading) {
-      final qs = questionsForSection(ActSection.reading, setNumber: _selectedSet);
+      final qs = randomizeForExamAttempt(
+          questionsForSection(ActSection.reading, setNumber: _selectedSet), rng);
       if (qs.isNotEmpty) {
         sections.add(_ExamSection(
           section: ActSection.reading,
@@ -253,7 +263,8 @@ class _ExamModeScreenState extends State<ExamModeScreen> {
       }
     }
     if (settings.includeScience) {
-      final qs = questionsForSection(ActSection.science, setNumber: _selectedSet);
+      final qs = randomizeForExamAttempt(
+          questionsForSection(ActSection.science, setNumber: _selectedSet), rng);
       if (qs.isNotEmpty) {
         sections.add(_ExamSection(
           section: ActSection.science,

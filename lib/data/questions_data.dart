@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
@@ -221,4 +222,80 @@ List<ActQuestion> questionsForRandomMix({int setNumber = 1}) {
     ...?set[ActSection.reading],
     ...?set[ActSection.science],
   ];
+}
+
+/// ───────────────────────────────────────────────────────────────────────
+/// Full Practice Exam randomization — a fresh shuffle every time someone
+/// starts an exam, so question 1 this attempt might be question 23 next
+/// time, and each question's A/B/C/D order is reshuffled too. The
+/// underlying question bank itself is never touched (this always
+/// operates on a COPY); only the list handed to that one exam session is
+/// reordered.
+/// ───────────────────────────────────────────────────────────────────────
+
+const List<String> _optionLetters = ['A', 'B', 'C', 'D'];
+
+/// Returns a new list with the same questions, in randomized order,
+/// EXCEPT that a Reading/Science passage's own questions stay together
+/// and in their original relative order — only which passage comes first
+/// gets shuffled. Without this, a fully random shuffle could interleave
+/// two different passages question-by-question, which would mean
+/// constantly flipping between unrelated passages, since ACT reading/
+/// science questions are written to be answered in sequence against "the
+/// passage above." English/Math questions have no shared passage, so
+/// each ends up as its own single-question block and shuffles freely.
+List<ActQuestion> _shuffleQuestionOrder(List<ActQuestion> questions, Random rng) {
+  final blocks = <List<ActQuestion>>[];
+  String? currentPassage;
+  List<ActQuestion>? currentBlock;
+
+  for (final q in questions) {
+    final samePassageAsPrevious =
+        q.passageText != null && currentBlock != null && q.passageText == currentPassage;
+    if (samePassageAsPrevious) {
+      currentBlock!.add(q);
+    } else {
+      currentBlock = [q];
+      blocks.add(currentBlock);
+      currentPassage = q.passageText;
+    }
+  }
+
+  blocks.shuffle(rng);
+  return [for (final block in blocks) ...block];
+}
+
+/// Returns a new [ActQuestion] with its options in a random order and
+/// [ActQuestion.correctAnswer] recalculated to match the new positions —
+/// grading (which just compares the chosen letter to correctAnswer) keeps
+/// working exactly as before, with no separate "which option is right"
+/// bookkeeping needed anywhere else in the app.
+ActQuestion _shuffleOptions(ActQuestion q, Random rng) {
+  final correctIndex = _optionLetters.indexOf(q.correctAnswer);
+  final order = List<int>.generate(q.options.length, (i) => i)..shuffle(rng);
+  final newOptions = [for (final i in order) q.options[i]];
+  final newCorrectIndex = order.indexOf(correctIndex);
+  return ActQuestion(
+    id: q.id,
+    setNumber: q.setNumber,
+    section: q.section,
+    skillArea: q.skillArea,
+    difficulty: q.difficulty,
+    questionText: q.questionText,
+    passageText: q.passageText,
+    options: newOptions,
+    correctAnswer: _optionLetters[newCorrectIndex],
+    explanation: q.explanation,
+    topicTip: q.topicTip,
+  );
+}
+
+/// Call this once per exam attempt, right after fetching a section's
+/// questions and before handing them to the exam session — shuffles
+/// question order (passage-aware, see [_shuffleQuestionOrder]) and each
+/// question's option order, both freshly randomized on every call.
+List<ActQuestion> randomizeForExamAttempt(List<ActQuestion> questions, [Random? rng]) {
+  final r = rng ?? Random();
+  final reordered = _shuffleQuestionOrder(questions, r);
+  return [for (final q in reordered) _shuffleOptions(q, r)];
 }
