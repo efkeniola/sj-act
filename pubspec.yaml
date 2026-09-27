@@ -48,7 +48,7 @@ dependencies:
 
   # ── In-app purchase: Google Play Billing (ACT plan checkout) ─────
   in_app_purchase: ^3.2.3
-  in_app_purchase_android: ^0.5.3
+  in_app_purchase_android: ^0.4.0+5
 
 dev_dependencies:
   flutter_test:

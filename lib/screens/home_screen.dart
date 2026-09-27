@@ -98,8 +98,8 @@ class _HomeScreenState extends State<HomeScreen> with RouteAware {
     if (!mounted) return;
     setState(() {
       _displayName = name ?? 'there';
-      _standardActive =
-          statuses[AppConstants.catStandard]?.isFullyActive ?? false;
+      _standardActive = AppConstants.tempUnlockStandard ||
+          (statuses[AppConstants.catStandard]?.isFullyActive ?? false);
       _onlineActive = AppConstants.tempUnlockWifiAndOnlineChallenge ||
           (statuses[AppConstants.catOnlineChallenge]?.isFullyActive ?? false);
       _wifiActive = AppConstants.tempUnlockWifiAndOnlineChallenge ||

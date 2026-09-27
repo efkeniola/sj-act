@@ -103,7 +103,8 @@ class _ExamModeScreenState extends State<ExamModeScreen> {
     final settings = await ExamSettingsService.loadAll();
     final profileDone = await ExamSettingsService.isProfileSetupDone();
     final statuses = await ActivationService.getAllStatuses();
-    final standardActive = statuses[AppConstants.catStandard]?.isFullyActive ?? false;
+    final standardActive = AppConstants.tempUnlockStandard ||
+        (statuses[AppConstants.catStandard]?.isFullyActive ?? false);
     final trialActive = await FreeTrialService.isTrialActive();
     if (!mounted) return;
     setState(() {
