@@ -13,6 +13,7 @@ import '../services/free_trial_service.dart';
 import '../services/user_profile_service.dart';
 import '../utils/constants.dart';
 import '../utils/theme.dart';
+import 'act_set_selection_screen.dart';
 import 'activation_screen.dart';
 import 'exam_mode_screen.dart';
 import 'section_screen.dart';
@@ -431,48 +432,29 @@ class _HomeScreenState extends State<HomeScreen> with RouteAware {
   }
 
   void _goToSection(ActSection section) async {
-    // Free (unactivated) users now see the SAME set-picker dialog an
-    // activated user sees — not a shortcut straight into Set 1's
+    // Free (unactivated) users now see the SAME set-picker screen an
+    // activated user sees — not a shortcut straight into ACT 1's
     // questions — so the experience is consistent either way. The only
-    // difference is which sets are tappable: a free user only gets Set 1;
-    // Sets 2 and 3 show locked and prompt to activate instead of opening.
-    final chosen = await _pickSetDialog(locked: _standardActive ? const {} : const {2, 3});
+    // difference is which sets are tappable: a free user only gets ACT 1;
+    // ACT 2 through ACT 100 show locked and prompt to activate instead of
+    // opening.
+    final chosen = await Navigator.push<int>(context, MaterialPageRoute(
+      builder: (_) => ActSetSelectionScreen(
+        title: 'Choose a Practice Set',
+        isLocked: (n) => n != 1 && !_standardActive,
+        subtitle: _standardActive
+            ? null
+            : 'ACT 1 is free to practice. Activate Standard to unlock every set.',
+        onLockedTap: (n) {
+          Navigator.pop(context); // close the picker first
+          _promptActivation();
+        },
+      ),
+    ));
     if (chosen == null) return; // cancelled
     if (!mounted) return;
     Navigator.push(context,
         MaterialPageRoute(builder: (_) => SectionScreen(section: section, setNumber: chosen)));
-  }
-
-  Future<int?> _pickSetDialog({Set<int> locked = const {}}) {
-    return showDialog<int>(
-      context: context,
-      builder: (_) => SimpleDialog(
-        title: const Text('Choose a Question Set'),
-        children: [1, 2, 3].map((n) {
-          final isLocked = locked.contains(n);
-          return SimpleDialogOption(
-            onPressed: isLocked
-                ? () {
-                    Navigator.pop(context); // close the picker first
-                    _promptActivation();
-                  }
-                : () => Navigator.pop(context, n),
-            child: Row(children: [
-              Icon(isLocked ? Icons.lock_outlined : Icons.quiz_outlined,
-                  size: 18, color: isLocked ? ActColors.midGray : ActColors.primary),
-              const SizedBox(width: 10),
-              Text('Set $n', style: TextStyle(
-                  fontWeight: FontWeight.w600,
-                  color: isLocked ? ActColors.midGray : (context.isDark ? Colors.white : ActColors.charcoal))),
-              if (isLocked) ...[
-                const Spacer(),
-                const Text('Activate to unlock', style: TextStyle(fontSize: 11, color: ActColors.midGray)),
-              ],
-            ]),
-          );
-        }).toList(),
-      ),
-    );
   }
 
   void _promptActivation({String? cat}) async {
@@ -1092,7 +1074,7 @@ class _FreeTrialBanner extends StatelessWidget {
               ),
               Text(
                 active
-                    ? '${_fmtRemaining(remaining)} left · Unlimited Set 1 exam, Online & WiFi trial matches, and Leaderboard access.'
+                    ? '${_fmtRemaining(remaining)} left · Unlimited ACT 1 exam, Online & WiFi trial matches, and Leaderboard access.'
                     : 'Unlimited Set 1 full exam, one Online Challenge match, one WiFi Challenge match, and Leaderboard access — free for 24 hours.',
                 style: TextStyle(fontSize: 11, color: ActColors.midGray, height: 1.4),
               ),

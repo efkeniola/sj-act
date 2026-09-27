@@ -14,6 +14,7 @@ import '../services/exam_settings_service.dart';
 import '../services/user_profile_service.dart';
 import '../utils/constants.dart';
 import '../utils/theme.dart';
+import 'act_set_selection_screen.dart';
 import 'activation_screen.dart';
 import 'exam_result_screen.dart';
 
@@ -195,9 +196,9 @@ class _ExamModeScreenState extends State<ExamModeScreen> {
       builder: (_) => AlertDialog(
         title: const Text('Full Practice Exam locked'),
         content: Text(_selectedSet != 1
-            ? 'Set $_selectedSet needs Standard activation. Set 1 is free.'
-            : 'Your one free Set 1 full exam has already been used. '
-                'Start a free 24-hour trial for unlimited Set 1 access, or activate for full access to every set.'),
+            ? 'ACT $_selectedSet needs Standard activation. ACT 1 is free.'
+            : 'Your one free ACT 1 full exam has already been used. '
+                'Start a free 24-hour trial for unlimited ACT 1 access, or activate for full access to every set.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
@@ -443,39 +444,37 @@ class _ExamSetupDialogState extends State<_ExamSetupDialog> {
     _selectedSet = widget.initialSet;
   }
 
+  /// Opens the full-screen ACT 1–ACT 100 picker (see
+  /// act_set_selection_screen.dart) instead of the old 3-chip Row, which
+  /// only ever worked because there were only 3 sets to lay out — with
+  /// 100 it would either overflow the dialog's width or force it into an
+  /// awkward wrap/scroll inside an already-scrolling dialog body. A
+  /// dedicated screen is the version of this that scales.
+  Future<void> _openSetPicker() async {
+    final chosen = await Navigator.push<int>(context, MaterialPageRoute(
+      builder: (_) => ActSetSelectionScreen(
+        title: 'Choose a Practice Set',
+        initialSet: _selectedSet,
+        isLocked: (n) => n != 1 && !widget.standardActive,
+        subtitle: widget.standardActive
+            ? null
+            : (widget.trialActive
+                ? 'Free trial: unlimited ACT 1 practice until your trial ends.'
+                : 'Free plan: one ACT 1 full exam. Activate for every set, unlimited.'),
+        onLockedTap: (n) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('ACT $n needs Standard activation. ACT 1 is free.'),
+          ));
+        },
+      ),
+    ));
+    if (chosen == null || !mounted) return;
+    setState(() => _selectedSet = chosen);
+    widget.onSetChanged(chosen);
+  }
+
   Widget _setPicker() {
-    Widget chip(int setNum) {
-      final locked = setNum != 1 && !widget.standardActive;
-      final selected = _selectedSet == setNum;
-      return Padding(
-        padding: const EdgeInsets.only(right: 8),
-        child: ChoiceChip(
-          label: Row(mainAxisSize: MainAxisSize.min, children: [
-            if (locked) const Padding(
-              padding: EdgeInsets.only(right: 4),
-              child: Icon(Icons.lock_outline, size: 13),
-            ),
-            Text('Set $setNum'),
-          ]),
-          selected: selected,
-          selectedColor: ActColors.primary,
-          labelStyle: TextStyle(
-            fontWeight: FontWeight.w700,
-            color: selected ? Colors.white : (locked ? ActColors.midGray : (context.isDark ? Colors.white : ActColors.charcoal)),
-          ),
-          onSelected: (_) {
-            if (locked) {
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                content: Text('Set $setNum needs Standard activation. Set 1 is free.'),
-              ));
-              return;
-            }
-            setState(() => _selectedSet = setNum);
-            widget.onSetChanged(setNum);
-          },
-        ),
-      );
-    }
+    final locked = _selectedSet != 1 && !widget.standardActive;
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Column(
@@ -483,14 +482,38 @@ class _ExamSetupDialogState extends State<_ExamSetupDialog> {
         children: [
           const Text('Question Set', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
           const SizedBox(height: 6),
-          Row(children: [chip(1), chip(2), chip(3)]),
+          InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: _openSetPicker,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                color: context.isDark ? ActColors.darkCard : Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: context.hairlineColor),
+              ),
+              child: Row(children: [
+                Icon(locked ? Icons.lock_outline : Icons.quiz_outlined,
+                    size: 18, color: locked ? ActColors.midGray : ActColors.primary),
+                const SizedBox(width: 10),
+                Text('ACT $_selectedSet', style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 14,
+                    color: context.isDark ? Colors.white : ActColors.charcoal)),
+                const Spacer(),
+                Text('Change', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: ActColors.primary)),
+                const SizedBox(width: 2),
+                Icon(Icons.chevron_right, size: 18, color: ActColors.primary),
+              ]),
+            ),
+          ),
           if (!widget.standardActive)
             Padding(
               padding: const EdgeInsets.only(top: 6),
               child: Text(
                 widget.trialActive
-                    ? 'Free trial: unlimited Set 1 practice until your trial ends.'
-                    : 'Free plan: one Set 1 full exam. Activate for every set, unlimited.',
+                    ? 'Free trial: unlimited ACT 1 practice until your trial ends.'
+                    : 'Free plan: one ACT 1 full exam. Activate for every set, unlimited.',
                 style: TextStyle(fontSize: 11, color: ActColors.midGray),
               ),
             ),

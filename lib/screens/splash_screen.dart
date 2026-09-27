@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../data/questions_data.dart';
 import '../services/user_profile_service.dart';
 import '../utils/theme.dart';
 import 'home_screen.dart';
@@ -26,7 +27,14 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
   }
 
   Future<void> _navigate() async {
-    await Future.delayed(const Duration(milliseconds: 1800));
+    // Load all 100 ACT question sets (21,500 questions) off the UI thread
+    // in parallel with the splash animation delay, so by the time this
+    // screen is ready to hand off, every set is already in memory and no
+    // screen anywhere in the app has to wait on it again.
+    await Future.wait([
+      Future.delayed(const Duration(milliseconds: 1800)),
+      QuestionBank.ensureLoaded(),
+    ]);
     if (!mounted) return;
     final name = await UserProfileService.getDisplayName();
     if (!mounted) return;
