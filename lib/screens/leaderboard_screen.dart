@@ -1,8 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/models.dart';
+import '../multiplayer/fake_online_challenge.dart';
 import '../services/database_service.dart';
 import '../services/leaderboard_service.dart';
 import '../services/user_profile_service.dart';
@@ -27,23 +29,75 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
   int _betRankingPoints = 0;
   String? _topChallengerToday;
 
+  // ── Online requirement ────────────────────────────────────────────────
+  // The board behaves like a live server board: it pings the network the
+  // same way Online Challenge does, and refuses to show anything while
+  // there is no real internet (Wi-Fi or mobile data).
+  bool _netOk = true;
+  bool _busy = false;
+  Timer? _connectivityTimer;
+  DateTime? _lastSynced;
+
+  // ── Rank / score movement since the last time the board was synced ────
+  static const _prefLastRank = 'act_lb_last_rank_v1';
+  static const _prefLastScore = 'act_lb_last_score_v1';
+  int? _rankDelta; // positive = moved up, negative = moved down
+  int? _prevRank;
+  double? _scoreBefore;
+  double? _scoreNow;
+
   @override
   void initState() {
     super.initState();
     _load(sync: true);
     // Auto-refresh every 5 minutes — simulates live board activity
     _refreshTimer = Timer.periodic(const Duration(minutes: 5), (_) => _load(sync: true));
+    // Light connectivity watch: if the connection drops the board is hidden,
+    // and it comes back (and re-syncs) on its own when the network returns.
+    _connectivityTimer = Timer.periodic(const Duration(seconds: 15), (_) => _watchConnection());
   }
 
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    _connectivityTimer?.cancel();
     super.dispose();
   }
 
+  Future<void> _watchConnection() async {
+    if (!mounted || _busy) return;
+    final ok = await FakeOnlineChallenge.hasRealInternet(timeout: const Duration(seconds: 4));
+    if (!mounted || _busy) return;
+    if (!ok && _netOk) {
+      setState(() => _netOk = false);
+    } else if (ok && !_netOk) {
+      _load(sync: true);
+    }
+  }
+
   Future<void> _load({bool sync = false}) async {
+    if (!mounted || _busy) return;
+    _busy = true;
+    try {
+      await _loadInner(sync: sync);
+    } finally {
+      _busy = false;
+    }
+  }
+
+  Future<void> _loadInner({bool sync = false}) async {
+    if (_entries.isEmpty || !_netOk) setState(() => _loading = true);
+
+    // Ping the network first — no internet, no leaderboard.
+    final online = await FakeOnlineChallenge.hasRealInternet(timeout: const Duration(seconds: 4));
     if (!mounted) return;
-    if (_entries.isEmpty) setState(() => _loading = true);
+    if (!online) {
+      setState(() {
+        _netOk = false;
+        _loading = false;
+      });
+      return;
+    }
 
     _displayName = await UserProfileService.getDisplayName() ?? 'You';
     _groupId = await ActLeaderboardService.getOrCreateGroupId();
@@ -93,10 +147,47 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
       milestone = ActLeaderboardService.checkMilestone(userRank);
     }
 
+    // Work out whether the user's score / position moved since the last
+    // successful sync (e.g. #88 -> #71 after a better score).
+    double? myScore;
+    for (final e in entries) {
+      if (e.isRealUser) {
+        myScore = e.compositeScore;
+        break;
+      }
+    }
+    int? rankDelta = _rankDelta;
+    int? prevRank = _prevRank;
+    double? scoreBefore = _scoreBefore;
+    double? scoreNow = _scoreNow;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedRank = prefs.getInt(_prefLastRank);
+      final savedScore = prefs.getDouble(_prefLastScore);
+      if (userRank != null && myScore != null) {
+        final rankChanged = savedRank != null && savedRank != userRank;
+        final scoreChanged = savedScore != null && (savedScore - myScore).abs() >= 0.05;
+        if (rankChanged || scoreChanged) {
+          prevRank = savedRank;
+          rankDelta = savedRank != null ? savedRank - userRank : null;
+          scoreBefore = savedScore;
+          scoreNow = myScore;
+        }
+        await prefs.setInt(_prefLastRank, userRank);
+        await prefs.setDouble(_prefLastScore, myScore);
+      }
+    } catch (_) {}
+
     if (!mounted) return;
     setState(() {
+      _netOk = true;
       _entries = entries;
       _userRank = userRank;
+      _rankDelta = rankDelta;
+      _prevRank = prevRank;
+      _scoreBefore = scoreBefore;
+      _scoreNow = scoreNow;
+      _lastSynced = DateTime.now();
       _loading = false;
     });
 
@@ -211,7 +302,9 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
           ),
         ],
       ),
-      body: Column(
+      body: !_netOk
+          ? _buildOffline()
+          : Column(
         children: [
           // Notice banner
           Container(
@@ -221,9 +314,23 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'Group $_groupId',
-                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: ActColors.primary),
+                Row(
+                  children: [
+                    Text(
+                      'Group $_groupId',
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: ActColors.primary),
+                    ),
+                    const Spacer(),
+                    Container(
+                      width: 7, height: 7,
+                      decoration: BoxDecoration(color: ActColors.success, shape: BoxShape.circle),
+                    ),
+                    const SizedBox(width: 5),
+                    Text(
+                      _lastSynced == null ? 'Live' : 'Live · synced ${_hhmm(_lastSynced!)}',
+                      style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: ActColors.success),
+                    ),
+                  ],
                 ),
                 Text(
                   'You are placed in a random group. You may not see friends here — this is by design. Updated every 5 minutes.',
@@ -255,6 +362,10 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
                 ],
               ),
             ),
+
+          // Score / position movement since the last sync.
+          if (_userRank != null && _rankDelta != null && _rankDelta != 0)
+            _buildMovementBanner(),
 
           // Bet ranking points — persistent tally from "ranking" bets.
           if (_betRankingPoints != 0)
@@ -336,7 +447,17 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
           // List
           Expanded(
             child: _loading
-                ? const Center(child: CircularProgressIndicator())
+                ? Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const CircularProgressIndicator(),
+                        const SizedBox(height: 14),
+                        Text('Connecting to leaderboard…',
+                            style: TextStyle(fontSize: 12, color: ActColors.midGray)),
+                      ],
+                    ),
+                  )
                 : ListView.builder(
                     itemCount: _entries.length,
                     itemBuilder: (context, i) {
@@ -351,6 +472,67 @@ class _LeaderboardScreenState extends State<LeaderboardScreen> {
                   ),
           ),
         ],
+      ),
+    );
+  }
+
+  String _hhmm(DateTime t) =>
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+  Widget _buildMovementBanner() {
+    final up = (_rankDelta ?? 0) > 0;
+    final places = (_rankDelta ?? 0).abs();
+    final color = up ? ActColors.success : ActColors.danger;
+    final scoreText = (_scoreBefore != null && _scoreNow != null)
+        ? ' · score ${_scoreBefore!.toStringAsFixed(1)} → ${_scoreNow!.toStringAsFixed(1)}'
+        : '';
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+      color: color.withOpacity(0.09),
+      child: Row(
+        children: [
+          Icon(up ? Icons.trending_up : Icons.trending_down, size: 16, color: color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '${up ? 'Up' : 'Down'} $places place${places == 1 ? '' : 's'}'
+              '${_prevRank != null ? ' (#$_prevRank → #$_userRank)' : ''}$scoreText',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: color),
+            ),
+          ),
+          Icon(Icons.cloud_done_outlined, size: 14, color: color),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOffline() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.wifi_off, size: 40, color: ActColors.danger),
+            const SizedBox(height: 14),
+            const Text('No internet connection detected',
+                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+                textAlign: TextAlign.center),
+            const SizedBox(height: 6),
+            Text(
+              'The leaderboard needs an internet connection (Wi-Fi or mobile data) to load and update your rank.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12.5, color: ActColors.midGray),
+            ),
+            const SizedBox(height: 16),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: ActColors.primary),
+              onPressed: () => _load(sync: true),
+              child: const Text('Try Again'),
+            ),
+          ],
+        ),
       ),
     );
   }
