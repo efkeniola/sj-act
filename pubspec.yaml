@@ -1,7 +1,7 @@
 name: sj_act
 description: SJ ACT - SmartJAMB ACT Prep App
 publish_to: 'none'
-version: 1.0.7+4
+version: 1.1.1+4
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
