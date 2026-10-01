@@ -1,7 +1,7 @@
 name: sj_act
 description: SJ ACT - SmartJAMB ACT Prep App
 publish_to: 'none'
-version: 1.0.9+3
+version: 1.0.7+4
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -47,8 +47,11 @@ dependencies:
   package_info_plus: ^8.1.1
 
   # ── In-app purchase: Google Play Billing (ACT plan checkout) ─────
-  in_app_purchase: ^3.2.3
-  in_app_purchase_android: ^0.4.0+5
+  # Play Billing Library 8.0.0+ is required by Google Play. in_app_purchase
+  # 3.3.0+ pulls in in_app_purchase_android 0.5.x, which bundles PBL 8.0.0
+  # (0.4.x bundled 7.1.1 and was rejected by Play Console).
+  in_app_purchase: ^3.3.0
+  in_app_purchase_android: ^0.5.0
 
   # Pure-Dart gzip/zlib decode for the ACT question bank asset. dart:io's
   # gzip codec only works on the VM (it's backed by native zlib) and
