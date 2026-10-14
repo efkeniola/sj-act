@@ -6,6 +6,14 @@ import 'package:http/http.dart' as http;
 import '../utils/constants.dart';
 import 'trusted_clock.dart';
 
+/// Result of classifying a network failure.
+class _NetFailure {
+  final String message;
+  final String headline;
+  final bool clockProblem;
+  const _NetFailure(this.message, this.headline, this.clockProblem);
+}
+
 /// Result wrapper — callers never need to handle raw exceptions.
 class ApiResult<T> {
   final bool success;
@@ -128,6 +136,80 @@ class ApiService {
     }
   }
 
+  // ── Telling "no internet" apart from "wrong phone date" ────────────────
+  // Phone dates outside this window are certainly wrong. Move the window
+  // forward when you ship a much newer release.
+  static final DateTime _plausibleFrom = DateTime.utc(2026, 1, 1);
+  static final DateTime _plausibleTo = DateTime.utc(2029, 1, 1);
+
+  /// No data / no WiFi / DNS failure / dropped connection.
+  static bool _isOffline(Object e) {
+    if (e is SocketException) return true;
+    final s = e.toString().toUpperCase();
+    return s.contains('SOCKETEXCEPTION') ||
+        s.contains('FAILED HOST LOOKUP') ||
+        s.contains('NETWORK IS UNREACHABLE') ||
+        s.contains('NO ROUTE TO HOST') ||
+        s.contains('CONNECTION REFUSED') ||
+        s.contains('CONNECTION RESET') ||
+        s.contains('CONNECTION ABORT') ||
+        s.contains('CONNECTION CLOSED') ||
+        s.contains('TERMINATED DURING HANDSHAKE'); // dropped mid-handshake = bad network, not bad date
+  }
+
+  /// The secure connection was refused because of the certificate. A wrong
+  /// phone date is the usual cause (certificates are checked against the
+  /// phone's clock), but a login-page WiFi or a blocking network can too.
+  static bool _isCertError(Object e) {
+    final s = e.toString().toUpperCase();
+    if (s.contains('TERMINATED DURING HANDSHAKE')) return false;
+    if (s.contains('CERTIFICATE_VERIFY_FAILED') ||
+        s.contains('CERT_NOT_YET_VALID') ||
+        s.contains('CERT_HAS_EXPIRED') ||
+        s.contains('CERTIFICATE HAS EXPIRED') ||
+        s.contains('NOT YET VALID')) {
+      return true;
+    }
+    return e is HandshakeException || e is TlsException;
+  }
+
+  static bool _phoneDateImplausible() {
+    final n = DateTime.now().toUtc();
+    return n.isBefore(_plausibleFrom) || !n.isBefore(_plausibleTo);
+  }
+
+  static String _phoneDateText() {
+    const m = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    final n = DateTime.now();
+    final hh = n.hour.toString().padLeft(2, '0');
+    final mm = n.minute.toString().padLeft(2, '0');
+    return '${n.day} ${m[n.month - 1]} ${n.year}, $hh:$mm';
+  }
+
+  static const String noInternetMessage =
+      "No internet connection. Turn on mobile data or WiFi, then try again.";
+
+  static String _badClockMessage() =>
+      "Your phone's date or time looks wrong (it shows ${_phoneDateText()}). A wrong date stops the secure "
+      "connection to the server. Open Settings → Date & time, turn on \"Set automatically\" (or set the correct "
+      "date and time), then try again.";
+
+  static String _secureFailMessage() =>
+      "A secure connection to the server couldn't be made. Your phone's date shows ${_phoneDateText()} — if that "
+      "is wrong, fix it in Settings → Date & time (Set automatically). If it is right, you may be on a WiFi that "
+      "needs a login or blocks the app — try another network.";
+
+  /// Classifies a network failure. Null = not one of the cases above.
+  static _NetFailure? _classify(Object e) {
+    if (_isCertError(e)) {
+      return _phoneDateImplausible()
+          ? _NetFailure(_badClockMessage(), 'Check your phone date & time', true)
+          : _NetFailure(_secureFailMessage(), 'Secure connection failed', false);
+    }
+    if (_isOffline(e)) return _NetFailure(noInternetMessage, 'No internet connection', false);
+    return null;
+  }
+
   /// Maps a raised exception to an accurate, distinct message instead of
   /// always blaming "check your internet connection" — that used to be a
   /// blanket `catch (_)` covering every possible failure (a real dropped
@@ -137,6 +219,8 @@ class ApiService {
   /// told to check their connection — the one thing that wasn't actually
   /// wrong, with no way to tell what really failed.
   static String _describeError(Object e) {
+    final f = _classify(e);
+    if (f != null) return f.message;
     if (e is SocketException) {
       return 'Could not reach the server. Please check your internet connection.';
     }
@@ -150,8 +234,7 @@ class ApiService {
       return 'Could not reach the server. Please check your internet connection.\n(${e.message})';
     }
     if (e is HandshakeException) {
-      return 'Secure connection to the server failed (certificate/TLS error). '
-          'This isn\'t a connectivity issue — please try again or contact support if it persists.';
+      return _secureFailMessage();
     }
     if (e is FormatException) {
       return 'The server sent back an unexpected response. This usually isn\'t '
