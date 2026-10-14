@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 
 import '../utils/constants.dart';
+import 'trusted_clock.dart';
 
 /// Result wrapper — callers never need to handle raw exceptions.
 class ApiResult<T> {
@@ -11,15 +12,19 @@ class ApiResult<T> {
   final T? data;
   final String? errorMessage;
   final bool wasTimeout;
+  /// The SERVER's current time (from its `Date` header) when it sent one.
+  /// Judge expiry with this — never with the phone's (changeable) date.
+  final DateTime? serverTime;
 
-  ApiResult.ok(this.data)
+  ApiResult.ok(this.data, {this.serverTime})
       : success = true,
         errorMessage = null,
         wasTimeout = false;
 
   ApiResult.fail(this.errorMessage, {this.wasTimeout = false})
       : success = false,
-        data = null;
+        data = null,
+        serverTime = null;
 }
 
 /// Activation-only server calls.
@@ -29,6 +34,34 @@ class ApiService {
         'Content-Type': 'application/json',
         AppConstants.apiKeyHeader: AppConstants.apiKeyValue,
       };
+
+  /// Reads the server's clock from the standard `Date` header
+  /// (e.g. "Tue, 13 Oct 2026 21:04:05 GMT"). Null if absent/unreadable.
+  static DateTime? _serverTimeOf(http.Response res) {
+    try {
+      final h = res.headers['date'];
+      if (h == null) return null;
+      final m = RegExp(r'(\d{1,2}) ([A-Za-z]{3}) (\d{4}) (\d{2}):(\d{2}):(\d{2})').firstMatch(h);
+      if (m == null) return null;
+      const months = {
+        'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+        'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12,
+      };
+      final mon = months[m.group(2)];
+      if (mon == null) return null;
+      final t = DateTime.utc(int.parse(m.group(3)!), mon, int.parse(m.group(1)!), int.parse(m.group(4)!),
+          int.parse(m.group(5)!), int.parse(m.group(6)!));
+      return t.year >= 2024 ? t : null; // ignore nonsense values
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static DateTime? _syncClock(http.Response res) {
+    final t = _serverTimeOf(res);
+    if (t != null) unawaited(TrustedClock.syncFromServer(t));
+    return t;
+  }
 
   static Future<ApiResult<Map<String, dynamic>>> post(
     String path,
@@ -43,8 +76,9 @@ class ApiService {
           )
           .timeout(AppConstants.apiTimeout);
 
+      final serverTime = _syncClock(res);
       if (res.statusCode >= 200 && res.statusCode < 300) {
-        return ApiResult.ok(jsonDecode(res.body) as Map<String, dynamic>);
+        return ApiResult.ok(jsonDecode(res.body) as Map<String, dynamic>, serverTime: serverTime);
       }
       final decoded = _safeDecode(res.body);
       return ApiResult.fail(
@@ -67,8 +101,9 @@ class ApiService {
           .get(Uri.parse('${AppConstants.baseApiUrl}$path'), headers: _headers)
           .timeout(AppConstants.apiTimeout);
 
+      final serverTime = _syncClock(res);
       if (res.statusCode >= 200 && res.statusCode < 300) {
-        return ApiResult.ok(jsonDecode(res.body) as Map<String, dynamic>);
+        return ApiResult.ok(jsonDecode(res.body) as Map<String, dynamic>, serverTime: serverTime);
       }
       final decoded = _safeDecode(res.body);
       return ApiResult.fail(

@@ -1,3 +1,4 @@
+import '../services/trusted_clock.dart';
 // Core models for SJ ACT
 
 enum ActSection { english, math, reading, science }
@@ -161,8 +162,10 @@ class ActivationRecord {
     this.duration = '6m',
   });
 
-  bool get isExpired => DateTime.now().isAfter(graceEndsAt);
-  bool get isInGrace => DateTime.now().isAfter(expiresAt) && !isExpired;
+  // TRUSTED clock (server-corrected, can't be rolled back) — not the phone's
+  // date — so changing the phone date can't revive an expired activation.
+  bool get isExpired => TrustedClock.nowSync.isAfter(graceEndsAt);
+  bool get isInGrace => TrustedClock.nowSync.isAfter(expiresAt) && !isExpired;
   bool get isFullyActive => !isExpired;
 
   Map<String, dynamic> toMap() => {

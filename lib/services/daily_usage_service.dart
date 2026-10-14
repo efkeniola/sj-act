@@ -2,6 +2,8 @@ import 'dart:math';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'trusted_clock.dart';
+
 /// Tracks daily usage of free-tier features.
 /// Standard activation (no online/wifi code) gets:
 ///   - Online Challenge: 1 free match per day
@@ -27,8 +29,9 @@ class DailyUsageService {
   static const int freeOnlinePerDay = 1;
   static const int freeWifiPerDay   = 2;
 
-  static String _today() {
-    final n = DateTime.now();
+  // TRUSTED clock: changing the phone date can't reset the daily free matches.
+  static Future<String> _today() async {
+    final n = await TrustedClock.now();
     return '${n.year}-${n.month.toString().padLeft(2,'0')}-${n.day.toString().padLeft(2,'0')}';
   }
 
@@ -39,7 +42,7 @@ class DailyUsageService {
   static Future<int> getOnlineUsedToday() async {
     final p = await _p;
     final date = p.getString(_keyOnlineDate) ?? '';
-    if (date != _today()) return 0;
+    if (date != (await _today())) return 0;
     return p.getInt(_keyOnlineCount) ?? 0;
   }
 
@@ -49,7 +52,7 @@ class DailyUsageService {
 
   static Future<void> recordOnlineUsage() async {
     final p = await _p;
-    final today = _today();
+    final today = (await _today());
     final stored = p.getString(_keyOnlineDate) ?? '';
     final count  = stored == today ? (p.getInt(_keyOnlineCount) ?? 0) : 0;
     await p.setString(_keyOnlineDate, today);
@@ -66,7 +69,7 @@ class DailyUsageService {
   static Future<int> getWifiUsedToday() async {
     final p = await _p;
     final date = p.getString(_keyWifiDate) ?? '';
-    if (date != _today()) return 0;
+    if (date != (await _today())) return 0;
     return p.getInt(_keyWifiCount) ?? 0;
   }
 
@@ -76,7 +79,7 @@ class DailyUsageService {
 
   static Future<void> recordWifiUsage() async {
     final p = await _p;
-    final today = _today();
+    final today = (await _today());
     final stored = p.getString(_keyWifiDate) ?? '';
     final count  = stored == today ? (p.getInt(_keyWifiCount) ?? 0) : 0;
     await p.setString(_keyWifiDate, today);
@@ -93,7 +96,7 @@ class DailyUsageService {
   static Future<String> _wifiGateStateToday() async {
     final p = await _p;
     final date = p.getString(_keyWifiGateDate) ?? '';
-    if (date != _today()) return 'none';
+    if (date != (await _today())) return 'none';
     return p.getString(_keyWifiGateState) ?? 'none';
   }
 
@@ -123,7 +126,7 @@ class DailyUsageService {
   /// regardless of another coin flip, so this can't loop forever.
   static Future<bool> recordWifiGateAnswer({required bool correct}) async {
     final p = await _p;
-    final today = _today();
+    final today = (await _today());
     if (correct) {
       await p.setString(_keyWifiGateDate, today);
       await p.setString(_keyWifiGateState, 'unlocked');

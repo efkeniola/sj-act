@@ -192,6 +192,20 @@ class DatabaseService {
     }
   }
 
+  /// Removes a category's cached activation (expired past grace, revoked,
+  /// tampered with, …) so nothing is left on the phone to be revived by
+  /// changing the date.
+  Future<void> deleteCachedActivation(String category) async {
+    if (kIsWeb) {
+      final rows = await _webGetAll('activation_cache');
+      rows.removeWhere((r) => r['category'] == category);
+      await _webSave('activation_cache', rows);
+      return;
+    }
+    final db = await database;
+    await db.delete('activation_cache', where: 'category = ?', whereArgs: [category]);
+  }
+
   // ── Clock guard ───────────────────────────────────────────────────────────
   Future<bool> checkAndUpdateClockGuard() async {
     final now = DateTime.now();

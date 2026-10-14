@@ -7,6 +7,7 @@ import '../utils/constants.dart';
 import 'api_service.dart';
 import 'database_service.dart';
 import 'device_service.dart';
+import 'trusted_clock.dart';
 import 'user_profile_service.dart';
 
 enum ActivationOutcome {
@@ -136,11 +137,36 @@ class ActivationService {
     // drift) and untrustworthy for something that timing logic depends
     // on — the server is the single source of truth for every other date
     // here (expiresAt), so activatedAt should be too.
-    final now = data['activated_at'] != null
-        ? DateTime.parse(data['activated_at'] as String)
-        : DateTime.now();
-    final expiresAt = DateTime.parse(data['expires_at'] as String);
-    final categories = (data['categories'] as List?)?.cast<String>() ?? ['standard'];
+    final DateTime expiresAt;
+    final DateTime now;
+    final List<String> categories;
+    try {
+      expiresAt = DateTime.parse(data['expires_at'] as String);
+      now = data['activated_at'] != null
+          ? DateTime.parse(data['activated_at'] as String)
+          : (result.serverTime ?? await TrustedClock.now());
+      categories = (data['categories'] as List?)?.cast<String>() ?? ['standard'];
+    } catch (_) {
+      return ActivationResult(
+        ActivationOutcome.failed,
+        null,
+        'Something went wrong: the server sent back an unexpected reply, so the code could not be activated. '
+        'Please try again.',
+      );
+    }
+
+    // An EXPIRED code must never activate anything and is never stored.
+    // Judged against the SERVER's time, not the phone's date, so a wrong or
+    // changed phone date can neither reject a valid code nor accept an
+    // expired one. (Grace is only for people who were already active.)
+    final serverNow = result.serverTime ?? await TrustedClock.now();
+    if (!expiresAt.isAfter(serverNow)) {
+      return ActivationResult(
+        ActivationOutcome.failed,
+        null,
+        'This code has expired (expired ${_fmtDate(expiresAt)}). Please use a valid code.',
+      );
+    }
 
     // Cache an activation record for each unlocked category
     ActivationRecord? firstRecord;
@@ -172,6 +198,12 @@ class ActivationService {
     );
   }
 
+  static String _fmtDate(DateTime d) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    final l = d.toLocal();
+    return '${months[l.month - 1]} ${l.day}, ${l.year}';
+  }
+
   static String _categoryLabel(String cat) {
     switch (cat) {
       case 'online_challenge': return 'Online Challenge';
@@ -181,7 +213,11 @@ class ActivationService {
   }
 
   static Future<ActivationResult> _cachedOfflineDetailed(String category) async {
-    final clockOk = await DatabaseService.instance.checkAndUpdateClockGuard();
+    // The TRUSTED clock is server-corrected and can never go backwards; it
+    // flags a phone date that was moved back (or its own data edited) until
+    // the app next reaches the server.
+    await TrustedClock.now();
+    final clockOk = !TrustedClock.clockSuspicious;
     if (!clockOk) {
       return ActivationResult(
         ActivationOutcome.failed,
@@ -195,16 +231,36 @@ class ActivationService {
       return ActivationResult(ActivationOutcome.failed, null, 'No previous activation found.');
     }
 
-    final record = ActivationRecord.fromMap(row);
-    final expectedSig = _sign(record);
-    if (row['signature'] != expectedSig) {
+    final ActivationRecord record;
+    try {
+      record = ActivationRecord.fromMap(row);
+    } catch (_) {
+      await DatabaseService.instance.deleteCachedActivation(category);
+      return ActivationResult(ActivationOutcome.failed, null, 'Your local activation data was damaged. Please re-enter your code.');
+    }
+    if (row['signature'] != _sign(record)) {
+      // Edited on the phone → throw it away; the code has to be re-entered
+      // (the server decides if it is still valid).
+      await DatabaseService.instance.deleteCachedActivation(category);
       return ActivationResult(
         ActivationOutcome.failed,
         null,
-        'Your local activation data could not be verified. Please reconnect to the internet.',
+        'Your local activation data could not be verified, so it was removed. Please re-enter your code.',
+      );
+    }
+    // Device binding: a database copied/restored from another phone must not
+    // work here.
+    if (record.deviceId != await DeviceService.getDeviceId()) {
+      return ActivationResult(
+        ActivationOutcome.failed,
+        null,
+        'This activation belongs to a different device. Please re-enter your code on this device.',
       );
     }
     if (record.isExpired) {
+      // Past expiry AND grace: delete it, so there is no stored date left to
+      // "revive" by changing the phone date.
+      await DatabaseService.instance.deleteCachedActivation(category);
       return ActivationResult(ActivationOutcome.failed, null, 'Your activation and grace period have both expired.');
     }
     return ActivationResult(
@@ -247,6 +303,9 @@ class ActivationService {
     final existingLocalRecord = await DatabaseService.instance.getCachedActivation(category);
     if (existingLocalRecord == null) return null;
 
+    // Anchor the trusted clock before any expiry maths below.
+    await TrustedClock.now();
+
     try {
       final deviceId = await DeviceService.getDeviceId();
       final result = await ApiService.get('/check-status/?category=$category&device_id=$deviceId')
@@ -268,12 +327,48 @@ class ActivationService {
           await DatabaseService.instance.cacheActivation(record, _sign(record));
           return record;
         }
+        // The server answered "not active". Keep the stored record ONLY while
+        // it is genuinely in its grace window; if it is past grace (or was
+        // revoked before its expiry) delete it so nothing is left to revive.
+        try {
+          final stored = ActivationRecord.fromMap(existingLocalRecord);
+          if (!stored.isInGrace) {
+            await DatabaseService.instance.deleteCachedActivation(category);
+          }
+        } catch (_) {
+          await DatabaseService.instance.deleteCachedActivation(category);
+        }
         return null;
       }
     } catch (_) {}
 
     final cached = await _cachedOfflineDetailed(category);
     return cached.record;
+  }
+
+  /// Deletes every stored activation that is past expiry + grace, edited, or
+  /// damaged. Run at app start so an expired activation's dates are removed
+  /// for good — after that, changing the phone date has nothing to revive.
+  static Future<void> purgeExpired() async {
+    try {
+      await TrustedClock.now();
+      for (final cat in [
+        AppConstants.catStandard,
+        AppConstants.catOnlineChallenge,
+        AppConstants.catWifiChallenge,
+      ]) {
+        final row = await DatabaseService.instance.getCachedActivation(cat);
+        if (row == null) continue;
+        try {
+          final record = ActivationRecord.fromMap(row);
+          if (row['signature'] != _sign(record) || record.isExpired) {
+            await DatabaseService.instance.deleteCachedActivation(cat);
+          }
+        } catch (_) {
+          await DatabaseService.instance.deleteCachedActivation(cat);
+        }
+      }
+    } catch (_) {}
   }
 
   /// Check all three categories at once.

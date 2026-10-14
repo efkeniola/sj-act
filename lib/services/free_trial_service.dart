@@ -1,6 +1,7 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/models.dart';
+import 'trusted_clock.dart';
 
 /// Manages the one-time, 24-hour Free Trial add-on and the always-on
 /// base Free Plan limits. This is separate from paid activation, which
@@ -67,7 +68,7 @@ class FreeTrialService {
   static Future<bool> startTrial() async {
     final p = await _p;
     if (p.containsKey(_kTrialStartedAt)) return false;
-    await p.setString(_kTrialStartedAt, DateTime.now().toIso8601String());
+    await p.setString(_kTrialStartedAt, (await TrustedClock.now()).toIso8601String());
     return true;
   }
 
@@ -75,20 +76,20 @@ class FreeTrialService {
   static Future<bool> isTrialActive() async {
     final start = await trialStartedAt();
     if (start == null) return false;
-    return DateTime.now().difference(start) < trialDuration;
+    return (await TrustedClock.now()).difference(start) < trialDuration;
   }
 
   /// True once the trial was started AND the 24 hours have elapsed.
   static Future<bool> isTrialExpired() async {
     final start = await trialStartedAt();
     if (start == null) return false;
-    return DateTime.now().difference(start) >= trialDuration;
+    return (await TrustedClock.now()).difference(start) >= trialDuration;
   }
 
   static Future<Duration> trialTimeRemaining() async {
     final start = await trialStartedAt();
     if (start == null) return Duration.zero;
-    final remaining = trialDuration - DateTime.now().difference(start);
+    final remaining = trialDuration - (await TrustedClock.now()).difference(start);
     return remaining.isNegative ? Duration.zero : remaining;
   }
 

@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 
 import 'utils/theme.dart';
 import 'screens/splash_screen.dart';
+import 'services/activation_service.dart';
+import 'services/trusted_clock.dart';
 
 // Shared by any screen that needs to know when it's become visible again
 // after a screen pushed on top of it was popped — HomeScreen uses this to
@@ -13,6 +15,10 @@ final RouteObserver<PageRoute> routeObserver = RouteObserver<PageRoute>();
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await loadSavedDarkMode();
+
+  // Anchor the tamper-resistant clock, then delete any activation that is
+  // past expiry + grace (or edited) before any screen checks access.
+  await ActivationService.purgeExpired();
 
   // Lock to portrait on mobile; allow landscape on tablet/desktop
   await SystemChrome.setPreferredOrientations([
