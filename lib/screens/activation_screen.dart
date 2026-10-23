@@ -6,6 +6,7 @@ import '../services/activation_service.dart';
 import '../services/user_profile_service.dart';
 import '../utils/constants.dart';
 import '../utils/theme.dart';
+import '../widgets/clock_paused_banner.dart';
 import 'act_plan_selection_screen.dart';
 
 class ActivationScreen extends StatefulWidget {
@@ -30,6 +31,7 @@ class _ActivationScreenState extends State<ActivationScreen> {
   ActivationRecord? _standardRecord;
   ActivationRecord? _onlineRecord;
   ActivationRecord? _wifiRecord;
+  bool _clockPaused = false; // phone date moved back → access paused
   bool _refreshing = false; // small inline indicator while (re)checking status — never blocks the screen
 
   @override
@@ -61,8 +63,13 @@ class _ActivationScreenState extends State<ActivationScreen> {
       _phoneCtrl.text = profile.phone;
     }
     final statuses = await ActivationService.getAllStatuses();
+    // Checked AFTER the status calls: a server reply repairs the clock, so the
+    // banner only stays when access is really paused.
+    final paused = statuses.values.every((r) => r == null) &&
+        await ActivationService.isPausedByClock();
     if (!mounted) return;
     setState(() {
+      _clockPaused = paused;
       _standardRecord = statuses[AppConstants.catStandard];
       _onlineRecord   = statuses[AppConstants.catOnlineChallenge];
       _wifiRecord     = statuses[AppConstants.catWifiChallenge];
@@ -131,6 +138,7 @@ class _ActivationScreenState extends State<ActivationScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (_clockPaused) const ClockPausedBanner(),
                   // ── Current status cards ──────────────────────────────
                   _buildStatusCard('Standard', AppConstants.catStandard, _standardRecord,
                       'Full ACT practice across all sections, analytics, syllabus, calculator, timetable.'),

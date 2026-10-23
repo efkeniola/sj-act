@@ -13,6 +13,7 @@ import '../services/free_trial_service.dart';
 import '../services/user_profile_service.dart';
 import '../utils/constants.dart';
 import '../utils/theme.dart';
+import '../widgets/clock_paused_banner.dart';
 import 'act_set_selection_screen.dart';
 import 'activation_screen.dart';
 import 'exam_mode_screen.dart';
@@ -37,6 +38,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> with RouteAware {
   String _displayName = 'there';
   bool _standardActive = false;
+  bool _clockPaused = false; // phone date moved back → access paused
   bool _onlineActive = false;
   bool _wifiActive = false;
   bool _loading = true;
@@ -85,6 +87,10 @@ class _HomeScreenState extends State<HomeScreen> with RouteAware {
   Future<void> _load() async {
     final name = await UserProfileService.getDisplayName();
     final statuses = await ActivationService.getAllStatuses();
+    // After the status calls (a server reply repairs the clock): only show the
+    // pause notice when nothing is active because the clock is paused.
+    final clockPaused = statuses.values.every((r) => r == null) &&
+        await ActivationService.isPausedByClock();
     final targetScore = await ExamSettingsService.getTargetScore();
     final attempts = await DatabaseService.instance.getAllAttempts();
     final trialStarted = await FreeTrialService.hasStartedTrial();
@@ -98,6 +104,7 @@ class _HomeScreenState extends State<HomeScreen> with RouteAware {
     if (!mounted) return;
     setState(() {
       _displayName = name ?? 'there';
+      _clockPaused = clockPaused;
       _standardActive = statuses[AppConstants.catStandard]?.isFullyActive ?? false;
       _onlineActive = AppConstants.tempUnlockWifiAndOnlineChallenge ||
           (statuses[AppConstants.catOnlineChallenge]?.isFullyActive ?? false);
@@ -268,6 +275,9 @@ class _HomeScreenState extends State<HomeScreen> with RouteAware {
                           composite: _bestComposite,
                           target: _targetScore,
                         ),
+
+                      // ── Access paused (phone date moved back) ────────────────
+                      if (_clockPaused) const ClockPausedBanner(),
 
                       // ── Activation banner ────────────────────────────────────
                       if (!_standardActive)

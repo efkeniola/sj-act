@@ -270,6 +270,12 @@ class ActivationService {
     );
   }
 
+  /// True while access is paused because the phone date was moved back / the
+  /// clock data was tampered with. Same behaviour as SJ NEET: nothing is
+  /// deleted, access just stays locked until the date is corrected (or the
+  /// server re-verifies), then resumes by itself.
+  static Future<bool> isPausedByClock() => TrustedClock.isPaused();
+
   /// Check current status for a category — tries server first, falls back to cache.
   ///
   /// Intentionally NEVER auto-detects/auto-reactivates a previous
@@ -331,8 +337,10 @@ class ActivationService {
         // it is genuinely in its grace window; if it is past grace (or was
         // revoked before its expiry) delete it so nothing is left to revive.
         try {
+          // While the clock is suspicious "in grace" can't be judged: pause
+          // (return null below) but keep the record so it resumes later.
           final stored = ActivationRecord.fromMap(existingLocalRecord);
-          if (!stored.isInGrace) {
+          if (!TrustedClock.clockSuspicious && !stored.isInGrace) {
             await DatabaseService.instance.deleteCachedActivation(category);
           }
         } catch (_) {
@@ -352,6 +360,10 @@ class ActivationService {
   static Future<void> purgeExpired() async {
     try {
       await TrustedClock.now();
+      // Date moved back / clock data edited: access is PAUSED, not expired.
+      // The trusted clock can't be relied on right now (a damaged clock reads
+      // as year 2100), so delete nothing — it resumes once the date is right.
+      if (TrustedClock.clockSuspicious) return;
       for (final cat in [
         AppConstants.catStandard,
         AppConstants.catOnlineChallenge,

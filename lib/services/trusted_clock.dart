@@ -41,6 +41,15 @@ class TrustedClock {
   /// re-verified it yet.
   static bool clockSuspicious = false;
 
+  /// True while paid access must stay PAUSED because the phone date was moved
+  /// back (or the stored clock data was edited). Re-checks the clock every
+  /// time, so it clears by itself the moment the user puts the date right
+  /// (or the app next reaches the server). Nothing is deleted while paused.
+  static Future<bool> isPaused() async {
+    await now();
+    return clockSuspicious;
+  }
+
   /// Synchronous "now" for getters. It advances with a stopwatch from the
   /// last [now] / [syncFromServer], so it can't be rolled back mid-session.
   /// Call `await TrustedClock.now()` first (startup + every status check do).
